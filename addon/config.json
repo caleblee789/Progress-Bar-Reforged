@@ -1,14 +1,15 @@
 {
     "progress_bar_enabled": true,
+    "display_location": "review_and_home",
     "mode": "stats",
     "dock_area": "top",
     "theme": "auto",
-    "toggle_shortcut": "Ctrl+G",
+    "toggle_shortcut": "Meta+G",
     "appearance": {
         "day": {
-            "text": "black",
-            "background": "rgba(228, 228, 228, 1)",
-            "foreground": "#3399cc",
+            "text": "#111827",
+            "background": "#e7edf3",
+            "foreground": "#12a8cc",
             "border_radius": 0,
             "opacity": 100
         },

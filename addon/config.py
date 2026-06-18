@@ -8,8 +8,8 @@ from aqt.qt import QColor, QPalette, QStyle, QStyleFactory, Qt
 
 from .nightmode import isnightmode
 
-# Preserve the original configuration namespace for compatibility with existing installs.
-CONFIG_KEY = "addon.reviewer_progress_bar"
+PACKAGE_ID = "1097423555"
+CONFIG_KEY = PACKAGE_ID
 LEGACY_WARNING_KEYS = {
     "warnings_enabled",
     "pace_warnings_enabled",
@@ -18,6 +18,31 @@ LEGACY_WARNING_KEYS = {
     "retention_warning_percent",
     "warning_colors",
 }
+LEGACY_SETTING_KEYS = set(LEGACY_WARNING_KEYS)
+
+
+def config_key() -> str:
+    """Return the Anki add-on package key used for config persistence."""
+
+    return CONFIG_KEY
+
+
+def read_config(mw) -> Dict[str, Any]:
+    config_data = mw.addonManager.getConfig(config_key())
+    return dict(config_data) if isinstance(config_data, dict) else {}
+
+
+def write_config(mw, new_config: Dict[str, Any]) -> None:
+    mw.addonManager.writeConfig(config_key(), dict(new_config))
+
+
+def resolve_theme_mode(theme: str) -> str:
+    theme_choice = str(theme or "auto").strip().lower()
+    if theme_choice == "dark":
+        return "dark"
+    if theme_choice == "light":
+        return "light"
+    return "dark" if isnightmode() else "light"
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -121,6 +146,7 @@ class WarningColors:
 @dataclass
 class Settings:
     progress_bar_enabled: bool
+    display_location: str
     mode: str
     theme: str
     include_new: bool
@@ -245,9 +271,7 @@ def _build_palette(theme: ThemeSettings) -> QPalette:
 
 def load_settings(mw) -> Tuple[Settings, List[str]]:
     """Load, validate, and normalize add-on settings."""
-    config_data = mw.addonManager.getConfig(CONFIG_KEY)
-    if not isinstance(config_data, dict):
-        config_data = {}
+    config_data = read_config(mw)
 
     errors: List[str] = []
     normalized: Dict[str, Any] = dict(config_data)
@@ -307,6 +331,12 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         return value
 
     progress_bar_enabled = _bool("progress_bar_enabled", True)
+    display_location = str(config_data.get("display_location", "review_and_home")).strip().lower()
+    if display_location not in {"review", "review_and_home"}:
+        errors.append(f"display_location {display_location!r} invalid; using review_and_home.")
+        display_location = "review_and_home"
+    normalized["display_location"] = display_location
+
     mode = str(config_data.get("mode", "stats")).strip().lower()
     if mode not in {"simple", "time_left", "stats"}:
         errors.append(f"mode {mode!r} invalid; using stats.")
@@ -420,7 +450,6 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     default_shortcut = "Meta+G" if sys.platform == "darwin" else "Ctrl+G"
     toggle_shortcut = str(config_data.get("toggle_shortcut", default_shortcut)).strip() or default_shortcut
     if sys.platform == "darwin" and toggle_shortcut.lower() == "ctrl+g":
-        errors.append("toggle_shortcut Ctrl+G is legacy on macOS; using Meta+G.")
         toggle_shortcut = "Meta+G"
     normalized["toggle_shortcut"] = toggle_shortcut
 
@@ -431,7 +460,7 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
 
     show_percent = _bool("show_percent", True)
     show_retention = _bool("show_retention", True)
-    show_super_mature_retention = _bool("show_super_mature_retention", True)
+    show_super_mature_retention = _bool("show_super_mature_retention", False)
     show_again = _bool("show_again", True)
     show_number = _bool("show_number", True)
     show_yesterday = _bool("show_yesterday", True)
@@ -467,7 +496,7 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         show_number = True
         show_again = True
         show_retention = True
-        show_super_mature_retention = True
+        show_super_mature_retention = bool(show_super_mature_retention)
         show_yesterday = True
 
     normalized.update(
@@ -481,13 +510,13 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
             "show_debug": show_debug,
         }
     )
-    for legacy_key in LEGACY_WARNING_KEYS:
+    for legacy_key in LEGACY_SETTING_KEYS:
         normalized.pop(legacy_key, None)
 
     default_day = {
-        "text": "black",
-        "background": "rgba(228, 228, 228, 1)",
-        "foreground": "#3399cc",
+        "text": "#111827",
+        "background": "#e7edf3",
+        "foreground": "#12a8cc",
         "border_radius": 0,
         "opacity": 100,
     }
@@ -512,7 +541,7 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     day_theme = _validate_theme(day_overrides, default_day, "appearance.day", errors)
     night_theme = _validate_theme(night_overrides, default_night, "appearance.night", errors)
 
-    theme_is_night = isnightmode() if theme == "auto" else theme == "dark"
+    theme_is_night = resolve_theme_mode(theme) == "dark"
     active_theme = night_theme if theme_is_night else day_theme
 
     segment_color_config = config_data.get("segment_colors", {}) if isinstance(config_data.get("segment_colors"), dict) else {}
@@ -569,6 +598,8 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         size_parts.append(f"padding: {padding};")
     if font_size:
         size_parts.append(f"font-size: {font_size};")
+    size_parts.append("font-weight: 600;")
+    size_parts.append("min-height: 22px;" if orientation == Qt.Orientation.Horizontal else "min-width: 22px;")
     restrict_size = " ".join(size_parts)
 
     default_stylesheet = (
@@ -600,6 +631,7 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
 
     settings = Settings(
         progress_bar_enabled=progress_bar_enabled,
+        display_location=display_location,
         mode=mode,
         theme=theme,
         include_new=include_new,
@@ -680,8 +712,14 @@ def reload_settings(mw, *, notify: Optional[Callable[[List[str]], None]] = None)
 def apply_config(mw, new_config: Dict[str, Any], *, notify: Optional[Callable[[List[str]], None]] = None) -> Settings:
     """Persist a new configuration payload and refresh the global settings."""
 
-    mw.addonManager.writeConfig(CONFIG_KEY, dict(new_config))
-    return reload_settings(mw, notify=notify)
+    config_to_write = dict(new_config)
+    for legacy_key in LEGACY_SETTING_KEYS:
+        config_to_write.pop(legacy_key, None)
+    write_config(mw, config_to_write)
+    new_settings = reload_settings(mw, notify=notify)
+    if config_to_write != new_settings.raw_config:
+        write_config(mw, new_settings.raw_config)
+    return new_settings
 
 
 # Alias preserved for test fixtures and legacy imports.

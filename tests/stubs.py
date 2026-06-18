@@ -34,16 +34,28 @@ class QColor:
     def __init__(self, *args: Any) -> None:
         if len(args) == 1 and isinstance(args[0], QColor):
             self.value = args[0].value
+            self.alpha_f = getattr(args[0], "alpha_f", 1.0)
+        elif len(args) >= 3:
+            self.value = tuple(int(arg) for arg in args[:3])
+            self.alpha_f = 1.0
         elif args:
             self.value = args[0]
+            self.alpha_f = 1.0
         else:
             self.value = "#000000"
+            self.alpha_f = 1.0
 
     def name(self) -> str:
         return str(self.value)
 
     def isValid(self) -> bool:
         return True
+
+    def setAlphaF(self, alpha: float) -> None:
+        self.alpha_f = alpha
+
+    def setAlpha(self, alpha: int) -> None:
+        self.alpha_f = alpha / 255
 
 
 class QPalette:
@@ -69,6 +81,11 @@ class QPalette:
         if not isinstance(other, QPalette):
             return False
         return self.colors == other.colors
+
+
+class QBrush:
+    def __init__(self, color: Any) -> None:
+        self.color = color
 
 
 class QRect:
@@ -152,6 +169,42 @@ class Qt:
         AlignVCenter = 0
 
 
+class QSize:
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+
+
+class QUrl:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    def toString(self) -> str:
+        return self.url
+
+
+class QIcon:
+    def __init__(self, path: str = "") -> None:
+        self.path = path
+
+
+class QPixmap:
+    def __init__(self, path: str = "") -> None:
+        self.path = path
+
+    def isNull(self) -> bool:
+        return not bool(self.path)
+
+
+class QDesktopServices:
+    last_url: Optional[QUrl] = None
+
+    @staticmethod
+    def openUrl(url: QUrl) -> bool:
+        QDesktopServices.last_url = url
+        return True
+
+
 class QWidget:
     def __init__(self, parent: Optional["QWidget"] = None) -> None:
         self._parent: Optional["QWidget"] = None
@@ -215,6 +268,12 @@ class QWidget:
     def hide(self) -> None:
         self._visible = False
 
+    def raise_(self) -> None:
+        self._raised = True
+
+    def activateWindow(self) -> None:
+        self._activated = True
+
     def setVisible(self, visible: bool) -> None:
         self._visible = visible
 
@@ -223,6 +282,13 @@ class QWidget:
 
     def width(self) -> int:
         return getattr(self, "_width", 100)
+
+    def height(self) -> int:
+        return getattr(self, "_height", 100)
+
+    def resize(self, width: int, height: int) -> None:
+        self._width = width
+        self._height = height
 
     def setFixedWidth(self, width: int) -> None:
         self._width = width
@@ -237,6 +303,7 @@ class QWidget:
 
     def setMinimumWidth(self, width: int) -> None:
         self._minimum_width = width
+        self._width = max(getattr(self, "_width", 0), width)
 
     def setMinimumHeight(self, height: int) -> None:
         self._minimum_height = height
@@ -255,6 +322,9 @@ class QWidget:
 
     def setCursor(self, cursor: Any) -> None:
         self._cursor = cursor
+
+    def setMouseTracking(self, enabled: bool) -> None:
+        self._mouse_tracking = enabled
 
     def deleteLater(self) -> None:
         self._deleted = True
@@ -343,6 +413,25 @@ class QStyleFactory:
         return None
 
 
+class QClipboard:
+    def __init__(self) -> None:
+        self._text = ""
+
+    def setText(self, text: str) -> None:
+        self._text = text
+
+    def text(self) -> str:
+        return self._text
+
+
+class QApplication:
+    _clipboard = QClipboard()
+
+    @staticmethod
+    def clipboard() -> QClipboard:
+        return QApplication._clipboard
+
+
 class QKeySequence:
     def __init__(self, key: str) -> None:
         self.key = key
@@ -406,6 +495,7 @@ class QDialog(QWidget):
         self._modal = modal
 
     def setMinimumWidth(self, width: int) -> None:
+        super().setMinimumWidth(width)
         self._minimum_width = width
 
     def exec(self) -> int:
@@ -582,6 +672,12 @@ class QToolButton(QPushButton):
     def setToolButtonStyle(self, style: Any) -> None:
         self._tool_button_style = style
 
+    def setIcon(self, icon: QIcon) -> None:
+        self._icon = icon
+
+    def setIconSize(self, size: QSize) -> None:
+        self._icon_size = size
+
 
 class QComboBox(QWidget):
     def __init__(self) -> None:
@@ -616,6 +712,7 @@ class QHeaderView(QWidget):
     class ResizeMode:
         Stretch = 0
         ResizeToContents = 1
+        Interactive = 2
 
     def setStretchLastSection(self, value: bool) -> None:
         self._stretch_last = value
@@ -624,6 +721,23 @@ class QHeaderView(QWidget):
         self._section_resize = getattr(self, "_section_resize", {})
         self._section_resize[section] = mode
 
+    def setMinimumSectionSize(self, size: int) -> None:
+        self._minimum_section_size = size
+
+
+class QStyledItemDelegate(QWidget):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+
+    def paint(self, *_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    def sizeHint(self, *_args: Any, **_kwargs: Any) -> QSize:
+        return QSize(170, 30)
+
+    def initStyleOption(self, *_args: Any, **_kwargs: Any) -> None:
+        pass
+
 
 class QTreeWidget(QWidget):
     def __init__(self) -> None:
@@ -631,6 +745,8 @@ class QTreeWidget(QWidget):
         self._header = QHeaderView()
         self._items: List["QTreeWidgetItem"] = []
         self._current_item: Optional["QTreeWidgetItem"] = None
+        self._headers: List[str] = []
+        self._column_widths: Dict[int, int] = {}
 
     def setRootIsDecorated(self, value: bool) -> None:
         self._root_decorated = value
@@ -640,6 +756,15 @@ class QTreeWidget(QWidget):
 
     def setAlternatingRowColors(self, value: bool) -> None:
         self._alternating_rows = value
+
+    def setAllColumnsShowFocus(self, value: bool) -> None:
+        self._all_columns_show_focus = value
+
+    def setIndentation(self, value: int) -> None:
+        self._indentation = value
+
+    def setTextElideMode(self, mode: Any) -> None:
+        self._text_elide_mode = mode
 
     def setHeaderLabels(self, labels: Sequence[str]) -> None:
         self._headers = list(labels)
@@ -663,6 +788,29 @@ class QTreeWidget(QWidget):
     def resizeColumnToContents(self, column: int) -> None:
         self._resized_columns = getattr(self, "_resized_columns", [])
         self._resized_columns.append(column)
+        texts = [self._headers[column] if column < len(self._headers) else ""]
+
+        def collect(item: "QTreeWidgetItem") -> None:
+            texts.append(item.text(column))
+            for child in item.children:
+                collect(child)
+
+        for item in self._items:
+            collect(item)
+        self._column_widths[column] = max(72, max((len(text) for text in texts), default=0) * 8 + 28)
+
+    def setColumnWidth(self, column: int, width: int) -> None:
+        self._column_widths[column] = width
+
+    def columnWidth(self, column: int) -> int:
+        return self._column_widths.get(column, 100)
+
+    def viewport(self) -> "QTreeWidget":
+        return self
+
+    def setItemDelegateForColumn(self, column: int, delegate: Any) -> None:
+        self._delegates = getattr(self, "_delegates", {})
+        self._delegates[column] = delegate
 
 
 class QTreeWidgetItem:
@@ -690,6 +838,17 @@ class QTreeWidgetItem:
 
     def setTextAlignment(self, column: int, alignment: Any) -> None:
         self._alignments[column] = alignment
+
+    def setToolTip(self, column: int, text: str) -> None:
+        self._tooltips = getattr(self, "_tooltips", {})
+        self._tooltips[column] = text
+
+    def toolTip(self, column: int) -> str:
+        return getattr(self, "_tooltips", {}).get(column, "")
+
+    def setForeground(self, column: int, brush: Any) -> None:
+        self._foregrounds = getattr(self, "_foregrounds", {})
+        self._foregrounds[column] = brush
 
 
 class QSpinBox(QWidget):
@@ -978,14 +1137,25 @@ class QPainter:
         self.filled.append((rect, brush))
 
 
+class ThemeManagerStub:
+    def __init__(self) -> None:
+        self.night_mode = False
+
+
 class AddonManagerStub:
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.config = config or {}
+        self.get_calls: List[str] = []
+        self.write_calls: List[Tuple[str, Dict[str, Any]]] = []
 
     def getConfig(self, name: str) -> Dict[str, Any]:
+        self.get_calls.append(name)
         return dict(self.config)
 
     def writeConfig(self, name: str, config: Dict[str, Any]) -> None:
+        if name.split(".", 1)[0] == "addon":
+            raise FileNotFoundError("[Errno 2] No such file or directory: 'addons21/addon/meta.json'")
+        self.write_calls.append((name, dict(config)))
         self.config = dict(config)
 
     def addonConfigDefaults(self, name: str) -> Dict[str, Any]:
@@ -1082,23 +1252,34 @@ def _ensure_module(name: str, module: types.ModuleType) -> types.ModuleType:
 def install_stubs(config: Optional[Dict[str, Any]] = None) -> MainWindowStub:
     aqt = sys.modules.get("aqt", types.ModuleType("aqt"))
     utils = types.ModuleType("aqt.utils")
+    theme = types.ModuleType("aqt.theme")
+    theme.theme_manager = ThemeManagerStub()
 
     def tooltip(message: str, parent: Optional[QWidget] = None, period: int = 0) -> str:
         if parent is not None:
             parent._last_tooltip = (message, period)
         return message
 
+    QDesktopServices.last_url = None
     utils.tooltip = tooltip
     qt = types.ModuleType("aqt.qt")
     qt.__dict__.update(
         {
+            "QDesktopServices": QDesktopServices,
+            "QIcon": QIcon,
+            "QPixmap": QPixmap,
+            "QSize": QSize,
+            "QUrl": QUrl,
             "QColor": QColor,
+            "QBrush": QBrush,
             "QPalette": QPalette,
             "QProgressBar": QProgressBar,
             "QDockWidget": QDockWidget,
             "QWidget": QWidget,
             "Qt": Qt,
             "QStyleFactory": QStyleFactory,
+            "QApplication": QApplication,
+            "QClipboard": QClipboard,
             "QKeySequence": QKeySequence,
             "QKeySequenceEdit": QKeySequenceEdit,
             "QShortcut": QShortcut,
@@ -1116,6 +1297,7 @@ def install_stubs(config: Optional[Dict[str, Any]] = None) -> MainWindowStub:
             "QTabWidget": QTabWidget,
             "QFrame": QFrame,
             "QHeaderView": QHeaderView,
+            "QStyledItemDelegate": QStyledItemDelegate,
             "QTreeWidget": QTreeWidget,
             "QTreeWidgetItem": QTreeWidgetItem,
             "QComboBox": QComboBox,
@@ -1146,10 +1328,12 @@ def install_stubs(config: Optional[Dict[str, Any]] = None) -> MainWindowStub:
     qt.__all__ = [name for name in qt.__dict__.keys() if not name.startswith("_")]
     _ensure_module("aqt.qt", qt)
     _ensure_module("aqt.utils", utils)
+    _ensure_module("aqt.theme", theme)
     mw = MainWindowStub(config)
     aqt.mw = mw
     aqt.gui_hooks = GuiHooks()
     aqt.utils = utils
+    aqt.theme = theme
     _ensure_module("aqt", aqt)
 
     anki = sys.modules.get("anki", types.ModuleType("anki"))

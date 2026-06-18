@@ -24,7 +24,6 @@ from aqt.qt import (
 from aqt.utils import tooltip
 
 from .. import config
-from ..nightmode import isnightmode
 
 nmStyleApplied = 0
 nmUnavailable = 0
@@ -36,6 +35,8 @@ _click_handler = None
 _progress_segment_tooltips: Dict[str, str] = {}
 _progress_fraction: float = 0.0
 _default_tooltip_text: str = ""
+PROGRESS_BAR_TOOLTIP_HINT = "Click for full Deck Breakdown."
+
 
 try:
     # Remove that annoying separator strip if we have Night Mode, avoiding conflicts with this add-on.
@@ -68,16 +69,16 @@ def _update_progress_tooltips(
     global _progress_fraction
     global _default_tooltip_text
 
-    _default_tooltip_text = default_text
+    _default_tooltip_text = PROGRESS_BAR_TOOLTIP_HINT
     _progress_segment_tooltips = {
-        "completed": completed_text or default_text,
-        "remaining": remaining_text or default_text,
+        "completed": PROGRESS_BAR_TOOLTIP_HINT,
+        "remaining": PROGRESS_BAR_TOOLTIP_HINT,
     }
     if fraction is not None:
         _progress_fraction = max(0.0, min(1.0, fraction))
 
     if progressBar is not None:
-        progressBar.setToolTip(default_text)
+        progressBar.setToolTip(_default_tooltip_text)
 
 
 def _on_progress_bar_tooltip(event: QHelpEvent) -> bool:
