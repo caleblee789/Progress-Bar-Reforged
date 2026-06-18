@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import sys
-from types import SimpleNamespace
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from aqt.qt import QColor, QPalette, QStyle, QStyleFactory, Qt
@@ -11,6 +10,14 @@ from .nightmode import isnightmode
 
 # Preserve the original configuration namespace for compatibility with existing installs.
 CONFIG_KEY = "addon.reviewer_progress_bar"
+LEGACY_WARNING_KEYS = {
+    "warnings_enabled",
+    "pace_warnings_enabled",
+    "time_warning_minutes",
+    "again_warning_percent",
+    "retention_warning_percent",
+    "warning_colors",
+}
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -101,6 +108,7 @@ class ThemeSettings:
     background: str
     foreground: str
     border_radius: int
+    opacity: int
 
 
 @dataclass
@@ -113,6 +121,8 @@ class WarningColors:
 @dataclass
 class Settings:
     progress_bar_enabled: bool
+    mode: str
+    theme: str
     include_new: bool
     include_rev: bool
     include_lrn: bool
@@ -130,44 +140,32 @@ class Settings:
     show_again: bool
     show_number: bool
     show_yesterday: bool
-    text_hierarchy_style: str
-    label_style: str
-    compact_separators: bool
-    vertical_text_line_break: bool
     show_debug: bool
-    show_progress_legend: bool
-    legend_position: str
     daily_target_cards: int
     target_review_minutes: int
     pace_warnings_enabled: bool
-    pacing_strategy: str
-    show_eta_confidence: bool
-    warning_hysteresis_percent: float
-    warning_cooldown_seconds: int
-    display_preset: str
-    onboarding_completed: bool
-    quick_setup_enabled: bool
-    focus_mode: bool
-    reduced_motion: bool
-    animated_updates: bool
-    show_segment_inline_labels: bool
-    show_warning_badge: bool
-    completion_celebration: bool
-    responsive_breakpoints: bool
-    warning_transition_animations: bool
-    pinned_deck_views: List[str]
-    auto_adjust_contrast: bool
-    deck_profiles: Dict[str, Dict[str, float]]
     toggle_shortcut: str
     scrolling_bar_when_editing: bool
     invert_progress: bool
     orientation: Qt.Orientation
     dock_area: Qt.DockWidgetArea
     max_width: str
+    min_height: str
+    bar_height: str
+    padding: str
     restrict_size: str
     progress_bar_style: str
     progress_bar_qstyle: Optional[QStyle]
     stacked_segments: bool
+    font_size: str
+    opacity: int
+    animation_enabled: bool
+    animation_duration_ms: int
+    tooltip_enabled: bool
+    tooltip_delay_ms: int
+    theme_preset: str
+    text_format: str
+    compact_mode: bool
     segment_colors: Dict[str, QColor]
     warnings_enabled: bool
     time_warning_minutes: int
@@ -200,11 +198,15 @@ def _validate_theme(
     text = _validate_color_string(overrides.get("text"), defaults["text"], f"{path}.text", errors)
     background = _validate_color_string(overrides.get("background"), defaults["background"], f"{path}.background", errors)
     foreground = _validate_color_string(overrides.get("foreground"), defaults["foreground"], f"{path}.foreground", errors)
-    border_radius = _coerce_int(overrides.get("border_radius"), defaults["border_radius"])
+    border_radius = _coerce_int(overrides.get("border_radius"), defaults.get("border_radius", 0))
     if border_radius < 0:
-        errors.append(f"{path}.border_radius must be >= 0; using {defaults['border_radius']}.")
-        border_radius = defaults["border_radius"]
-    return ThemeSettings(text=text, background=background, foreground=foreground, border_radius=border_radius)
+        errors.append(f"{path}.border_radius must be >= 0; using {defaults.get('border_radius', 0)}.")
+        border_radius = defaults.get("border_radius", 0)
+    opacity = _coerce_int(overrides.get("opacity"), defaults.get("opacity", 100))
+    if opacity < 0 or opacity > 100:
+        errors.append(f"{path}.opacity must be 0-100; using {defaults.get('opacity', 100)}.")
+        opacity = max(0, min(100, opacity))
+    return ThemeSettings(text=text, background=background, foreground=foreground, border_radius=border_radius, opacity=opacity)
 
 
 def _color_or_default(
@@ -229,76 +231,6 @@ def _validate_color_string(value: Any, default: str, key: str, errors: List[str]
         errors.append(f"{key} had an invalid color; using {default}.")
         return default
     return candidate
-
-
-def _relative_luminance(color: QColor) -> float:
-    def ch(v: int) -> float:
-        x = v / 255.0
-        return x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4
-
-    try:
-        r, g, b = color.red(), color.green(), color.blue()
-    except Exception:
-        try:
-            name = color.name()
-            if isinstance(name, str) and name.startswith("#") and len(name) >= 7:
-                r = int(name[1:3], 16)
-                g = int(name[3:5], 16)
-                b = int(name[5:7], 16)
-            else:
-                return 1.0
-        except Exception:
-            return 1.0
-
-    return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
-
-
-def _contrast_ratio(foreground: QColor, background: QColor) -> float:
-    l1 = _relative_luminance(foreground)
-    l2 = _relative_luminance(background)
-    lighter = max(l1, l2)
-    darker = min(l1, l2)
-    return (lighter + 0.05) / (darker + 0.05)
-
-
-def _ensure_contrast(text: QColor, background: QColor, minimum: float = 4.5) -> Tuple[QColor, float]:
-    ratio = _contrast_ratio(text, background)
-    if ratio >= minimum:
-        return text, ratio
-
-    if _relative_luminance(background) < 0.5:
-        adjusted = QColor("#ffffff")
-    else:
-        adjusted = QColor("#111111")
-    return adjusted, _contrast_ratio(adjusted, background)
-
-
-def _resolve_qstyle(style_name: str) -> Optional[QStyle]:
-    """Resolve a QStyle by name while tolerating platform-specific casing differences."""
-
-    candidate = (style_name or "").strip()
-    if not candidate:
-        return None
-
-    # Fast path for an exact style name.
-    style = QStyleFactory.create(candidate)
-    if style is not None:
-        return style
-
-    # Cross-platform fallback: style keys differ by platform and casing.
-    try:
-        keys = list(QStyleFactory.keys())
-    except Exception:
-        keys = []
-
-    lowered = candidate.lower()
-    for key in keys:
-        if str(key).lower() == lowered:
-            style = QStyleFactory.create(str(key))
-            if style is not None:
-                return style
-
-    return None
 
 
 def _build_palette(theme: ThemeSettings) -> QPalette:
@@ -375,6 +307,18 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         return value
 
     progress_bar_enabled = _bool("progress_bar_enabled", True)
+    mode = str(config_data.get("mode", "stats")).strip().lower()
+    if mode not in {"simple", "time_left", "stats"}:
+        errors.append(f"mode {mode!r} invalid; using stats.")
+        mode = "stats"
+    normalized["mode"] = mode
+
+    theme = str(config_data.get("theme", "auto")).strip().lower()
+    if theme not in {"auto", "light", "dark"}:
+        errors.append(f"theme {theme!r} invalid; using auto.")
+        theme = "auto"
+    normalized["theme"] = theme
+
     include_new = _bool("include_new", True)
     include_rev = _bool("include_rev", True)
     include_lrn = _bool("include_lrn", True)
@@ -395,60 +339,8 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     scrolling_bar_when_editing = _bool("scrolling_bar_when_editing", True)
     invert_progress = _bool("invert_progress", False)
     stacked_segments = _bool("stacked_segments", False)
-    warnings_enabled = _bool("warnings_enabled", False)
-    pace_warnings_enabled = _bool("pace_warnings_enabled", True)
-    show_eta_confidence = _bool("show_eta_confidence", True)
-    auto_adjust_contrast = _bool("auto_adjust_contrast", True)
-    onboarding_completed = _bool("onboarding_completed", False)
-    quick_setup_enabled = _bool("quick_setup_enabled", True)
-    focus_mode = _bool("focus_mode", False)
-    reduced_motion = _bool("reduced_motion", False)
-    animated_updates = _bool("animated_updates", True)
-    show_segment_inline_labels = _bool("show_segment_inline_labels", False)
-    show_warning_badge = _bool("show_warning_badge", True)
-    completion_celebration = _bool("completion_celebration", True)
-    responsive_breakpoints = _bool("responsive_breakpoints", True)
-    warning_transition_animations = _bool("warning_transition_animations", True)
-
-    pinned_views_raw = config_data.get("pinned_deck_views", [])
-    pinned_deck_views: List[str] = []
-    if isinstance(pinned_views_raw, list):
-        pinned_deck_views = [str(item) for item in pinned_views_raw if str(item).strip()]
-    elif pinned_views_raw not in (None, ""):
-        errors.append("pinned_deck_views must be a list; using [].")
-    normalized["pinned_deck_views"] = pinned_deck_views
-
-    pacing_strategy = str(config_data.get("pacing_strategy", "ewma")).lower()
-    if pacing_strategy not in {"average", "ewma", "trimmed", "median", "segmented"}:
-        errors.append(f"pacing_strategy {pacing_strategy!r} invalid; using ewma.")
-        pacing_strategy = "ewma"
-    normalized["pacing_strategy"] = pacing_strategy
-
-    display_preset = str(config_data.get("display_preset", "compact")).lower()
-    if display_preset not in {"minimal", "compact", "expanded"}:
-        errors.append(f"display_preset {display_preset!r} invalid; using compact.")
-        display_preset = "compact"
-    normalized["display_preset"] = display_preset
-
-    warning_hysteresis_percent = _float("warning_hysteresis_percent", 2.0, minimum=0.0, maximum=20.0)
-    warning_cooldown_seconds = _int("warning_cooldown_seconds", 15, minimum=0, maximum=600)
-
-    deck_profiles_raw = config_data.get("deck_profiles", {})
-    deck_profiles: Dict[str, Dict[str, float]] = {}
-    if isinstance(deck_profiles_raw, dict):
-        for key, profile in deck_profiles_raw.items():
-            if not isinstance(profile, dict):
-                continue
-            did = str(key)
-            deck_profiles[did] = {
-                "new_weight": _coerce_float(profile.get("new_weight"), 1.0),
-                "lrn_weight": _coerce_float(profile.get("lrn_weight"), 1.0),
-                "rev_weight": _coerce_float(profile.get("rev_weight"), 1.0),
-                "expected_seconds": _coerce_float(profile.get("expected_seconds"), 0.0),
-            }
-    else:
-        errors.append("deck_profiles must be an object; using defaults.")
-    normalized["deck_profiles"] = deck_profiles
+    warnings_enabled = False
+    pace_warnings_enabled = False
 
     orientation_map = {
         "horizontal": Qt.Orientation.Horizontal,
@@ -481,11 +373,45 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     max_width = _normalize_dimension(config_data.get("max_width", ""))
     normalized["max_width"] = max_width
 
-    progress_bar_style = str(config_data.get("progress_bar_style", "")).strip()
+    min_height = _normalize_dimension(config_data.get("min_height", ""))
+    normalized["min_height"] = min_height
+
+    bar_height = _normalize_dimension(config_data.get("bar_height", ""))
+    normalized["bar_height"] = bar_height
+
+    padding = _normalize_dimension(config_data.get("padding", ""))
+    normalized["padding"] = padding
+
+    font_size = _normalize_dimension(config_data.get("font_size", ""))
+    normalized["font_size"] = font_size
+
+    opacity = _int("opacity", 100, minimum=0, maximum=100)
+    animation_enabled = _bool("animation_enabled", True)
+    animation_duration_ms = _int("animation_duration_ms", 300, minimum=0, maximum=2000)
+    tooltip_enabled = _bool("tooltip_enabled", True)
+    tooltip_delay_ms = _int("tooltip_delay_ms", 500, minimum=0, maximum=5000)
+
+    theme_preset_raw = str(config_data.get("theme_preset", "default")).lower()
+    valid_presets = {"default", "minimal", "colorful", "dark", "light", "high_contrast"}
+    if theme_preset_raw not in valid_presets:
+        errors.append(f"theme_preset {theme_preset_raw!r} invalid; using default.")
+        theme_preset_raw = "default"
+    normalized["theme_preset"] = theme_preset_raw
+
+    text_format_raw = str(config_data.get("text_format", "auto")).lower()
+    valid_formats = {"auto", "compact", "verbose", "minimal"}
+    if text_format_raw not in valid_formats:
+        errors.append(f"text_format {text_format_raw!r} invalid; using auto.")
+        text_format_raw = "auto"
+    normalized["text_format"] = text_format_raw
+
+    compact_mode = _bool("compact_mode", False)
+
+    progress_bar_style = str(config_data.get("progress_bar_style", ""))
     normalized["progress_bar_style"] = progress_bar_style
     progress_bar_qstyle: Optional[QStyle] = None
     if progress_bar_style:
-        progress_bar_qstyle = _resolve_qstyle(progress_bar_style)
+        progress_bar_qstyle = QStyleFactory.create(progress_bar_style)
         if progress_bar_qstyle is None:
             errors.append(f"progress_bar_style {progress_bar_style!r} not available; using default theme style.")
             progress_bar_style = ""
@@ -509,47 +435,68 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     show_again = _bool("show_again", True)
     show_number = _bool("show_number", True)
     show_yesterday = _bool("show_yesterday", True)
-    text_hierarchy_style = str(config_data.get("text_hierarchy_style", "compact")).lower()
-    if text_hierarchy_style not in {"compact", "two_line"}:
-        errors.append(f"text_hierarchy_style {text_hierarchy_style!r} invalid; using compact.")
-        text_hierarchy_style = "compact"
-    normalized["text_hierarchy_style"] = text_hierarchy_style
-    label_style = str(config_data.get("label_style", "detailed")).lower()
-    if label_style not in {"compact", "detailed"}:
-        errors.append(f"label_style {label_style!r} invalid; using detailed.")
-        label_style = "detailed"
-    normalized["label_style"] = label_style
-    compact_separators = _bool("compact_separators", True)
-    vertical_text_line_break = _bool("vertical_text_line_break", True)
     show_debug = _bool("show_debug", False)
-    show_progress_legend = _bool("show_progress_legend", False)
-
-    legend_position_raw = str(config_data.get("legend_position", "below")).lower()
-    if legend_position_raw not in {"above", "below", "left", "right"}:
-        errors.append(f"legend_position {legend_position_raw!r} invalid; using below.")
-        legend_position_raw = "below"
-    normalized["legend_position"] = legend_position_raw
 
     daily_target_cards = _int("daily_target_cards", 0, minimum=0)
     target_review_minutes = _int("target_review_minutes", 0, minimum=0)
 
-    time_warning_minutes = _int("time_warning_minutes", 45, minimum=0)
-    again_warning_percent = _float("again_warning_percent", 15.0, minimum=0.0, maximum=100.0)
-    retention_warning_percent = _float("retention_warning_percent", 80.0, minimum=0.0, maximum=100.0)
+    time_warning_minutes = 0
+    again_warning_percent = 0.0
+    retention_warning_percent = 0.0
 
     history_days = _int("history_days", 30, minimum=0)
+
+    if mode == "simple":
+        show_percent = True
+        show_number = True
+        show_again = False
+        show_retention = False
+        show_super_mature_retention = False
+        show_yesterday = False
+        show_debug = False
+    elif mode == "time_left":
+        show_percent = True
+        show_number = True
+        show_again = False
+        show_retention = False
+        show_super_mature_retention = False
+        show_yesterday = False
+        show_debug = False
+    else:
+        show_percent = True
+        show_number = True
+        show_again = True
+        show_retention = True
+        show_super_mature_retention = True
+        show_yesterday = True
+
+    normalized.update(
+        {
+            "show_percent": show_percent,
+            "show_number": show_number,
+            "show_again": show_again,
+            "show_retention": show_retention,
+            "show_super_mature_retention": show_super_mature_retention,
+            "show_yesterday": show_yesterday,
+            "show_debug": show_debug,
+        }
+    )
+    for legacy_key in LEGACY_WARNING_KEYS:
+        normalized.pop(legacy_key, None)
 
     default_day = {
         "text": "black",
         "background": "rgba(228, 228, 228, 1)",
         "foreground": "#3399cc",
         "border_radius": 0,
+        "opacity": 100,
     }
     default_night = {
         "text": "aliceblue",
         "background": "rgba(39, 40, 40, 1)",
         "foreground": "#3399cc",
         "border_radius": 0,
+        "opacity": 100,
     }
 
     appearance = config_data.get("appearance", {})
@@ -565,26 +512,8 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     day_theme = _validate_theme(day_overrides, default_day, "appearance.day", errors)
     night_theme = _validate_theme(night_overrides, default_night, "appearance.night", errors)
 
-    active_theme = night_theme if isnightmode() else day_theme
-
-    hierarchy_font_weight = "bold" if text_hierarchy_style == "two_line" else ("600" if isnightmode() else "normal")
-    hierarchy_font_size = "11px" if (text_hierarchy_style == "two_line" and orientation == Qt.Orientation.Vertical) else "12px"
-
-    active_text = _to_qcolor(active_theme.text)
-    active_bg = _to_qcolor(active_theme.background)
-    contrast_ratio = _contrast_ratio(active_text, active_bg)
-    if contrast_ratio < 4.5:
-        if auto_adjust_contrast:
-            adjusted_text, new_ratio = _ensure_contrast(active_text, active_bg)
-            errors.append(f"appearance contrast too low ({contrast_ratio:.2f}); adjusted text color to {adjusted_text.name()} ({new_ratio:.2f}).")
-            active_theme = ThemeSettings(
-                text=adjusted_text.name(),
-                background=active_theme.background,
-                foreground=active_theme.foreground,
-                border_radius=active_theme.border_radius,
-            )
-        else:
-            errors.append(f"appearance contrast is low ({contrast_ratio:.2f}); text may be hard to read.")
+    theme_is_night = isnightmode() if theme == "auto" else theme == "dark"
+    active_theme = night_theme if theme_is_night else day_theme
 
     segment_color_config = config_data.get("segment_colors", {}) if isinstance(config_data.get("segment_colors"), dict) else {}
     if not isinstance(segment_color_config, dict):
@@ -602,42 +531,14 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         "review": segment_colors["review"].name(),
     }
 
-    warning_color_config = config_data.get("warning_colors", {}) if isinstance(config_data.get("warning_colors"), dict) else {}
-    if not isinstance(warning_color_config, dict):
-        errors.append("warning_colors must be an object; using defaults.")
-        warning_color_config = {}
-
-    default_warning_colors = {
-        "text": active_theme.text,
-        "background": active_theme.background,
-        "foreground": active_theme.foreground,
-    }
     warning_colors = WarningColors(
-        text=_color_or_default(
-            warning_color_config.get("text"), default_warning_colors["text"], "warning_colors.text", errors
-        ),
-        background=_color_or_default(
-            warning_color_config.get("background"), default_warning_colors["background"], "warning_colors.background", errors
-        ),
-        foreground=_color_or_default(
-            warning_color_config.get("foreground"), default_warning_colors["foreground"], "warning_colors.foreground", errors
-        ),
+        text=_to_qcolor(active_theme.text),
+        background=_to_qcolor(active_theme.background),
+        foreground=_to_qcolor(active_theme.foreground),
     )
-    normalized["warning_colors"] = {
-        "text": "" if warning_color_config.get("text") in (None, "") else warning_colors.text.name(),
-        "background": "" if warning_color_config.get("background") in (None, "") else warning_colors.background.name(),
-        "foreground": "" if warning_color_config.get("foreground") in (None, "") else warning_colors.foreground.name(),
-    }
 
     palette = _build_palette(active_theme)
-    warning_palette = _build_palette(
-        ThemeSettings(
-            text=warning_colors.text.name(),
-            background=warning_colors.background.name(),
-            foreground=warning_colors.foreground.name(),
-            border_radius=active_theme.border_radius,
-        )
-    )
+    warning_palette = QPalette(palette)
 
     normalized["appearance"] = {
         "day": {
@@ -645,23 +546,30 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
             "background": day_theme.background,
             "foreground": day_theme.foreground,
             "border_radius": day_theme.border_radius,
+            "opacity": day_theme.opacity,
         },
         "night": {
             "text": night_theme.text,
             "background": night_theme.background,
             "foreground": night_theme.foreground,
             "border_radius": night_theme.border_radius,
+            "opacity": night_theme.opacity,
         },
     }
 
     restrict_size = ""
+    size_parts = []
     if max_width:
-        restrict_size = f"max-width: {max_width};" if orientation == Qt.Orientation.Horizontal else f"max-height: {max_width};"
-    warning_transition = (
-        "transition: color 160ms ease, background-color 160ms ease;"
-        if warning_transition_animations and not reduced_motion
-        else ""
-    )
+        size_parts.append(f"max-width: {max_width};" if orientation == Qt.Orientation.Horizontal else f"max-height: {max_width};")
+    if min_height:
+        size_parts.append(f"min-height: {min_height};" if orientation == Qt.Orientation.Horizontal else f"min-width: {min_height};")
+    if bar_height:
+        size_parts.append(f"height: {bar_height};" if orientation == Qt.Orientation.Horizontal else f"width: {bar_height};")
+    if padding:
+        size_parts.append(f"padding: {padding};")
+    if font_size:
+        size_parts.append(f"font-size: {font_size};")
+    restrict_size = " ".join(size_parts)
 
     default_stylesheet = (
         '''
@@ -671,9 +579,6 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
                     color:%s;
                     background-color: %s;
                     border-radius: %dpx;
-                    font-size: %s;
-                    font-weight: %s;
-                    %s
                     %s
                 }
                 QProgressBar::chunk
@@ -686,48 +591,17 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
             active_theme.text,
             active_theme.background,
             active_theme.border_radius,
-            hierarchy_font_size,
-            hierarchy_font_weight,
-            warning_transition,
             restrict_size,
             active_theme.foreground,
             active_theme.border_radius,
         )
     )
-    warning_stylesheet = (
-        '''
-                QProgressBar
-                {
-                    text-align:center;
-                    color:%s;
-                    background-color: %s;
-                    border-radius: %dpx;
-                    font-size: %s;
-                    font-weight: %s;
-                    %s
-                    %s
-                }
-                QProgressBar::chunk
-                {
-                    background-color: %s;
-                    margin: 0px;
-                    border-radius: %dpx;
-                }
-                ''' % (
-            warning_colors.text.name(),
-            warning_colors.background.name(),
-            active_theme.border_radius,
-            hierarchy_font_size,
-            hierarchy_font_weight,
-            warning_transition,
-            restrict_size,
-            warning_colors.foreground.name(),
-            active_theme.border_radius,
-        )
-    )
+    warning_stylesheet = default_stylesheet
 
     settings = Settings(
         progress_bar_enabled=progress_bar_enabled,
+        mode=mode,
+        theme=theme,
         include_new=include_new,
         include_rev=include_rev,
         include_lrn=include_lrn,
@@ -745,23 +619,29 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         show_again=show_again,
         show_number=show_number,
         show_yesterday=show_yesterday,
-        text_hierarchy_style=text_hierarchy_style,
-        label_style=label_style,
-        compact_separators=compact_separators,
-        vertical_text_line_break=vertical_text_line_break,
         show_debug=show_debug,
-        show_progress_legend=show_progress_legend,
-        legend_position=legend_position_raw,
         toggle_shortcut=toggle_shortcut,
         scrolling_bar_when_editing=scrolling_bar_when_editing,
         invert_progress=invert_progress,
         orientation=orientation,
         dock_area=dock_area,
         max_width=max_width,
+        min_height=min_height,
+        bar_height=bar_height,
+        padding=padding,
         restrict_size=restrict_size,
         progress_bar_style=progress_bar_style,
         progress_bar_qstyle=progress_bar_qstyle,
         stacked_segments=stacked_segments,
+        font_size=font_size,
+        opacity=opacity,
+        animation_enabled=animation_enabled,
+        animation_duration_ms=animation_duration_ms,
+        tooltip_enabled=tooltip_enabled,
+        tooltip_delay_ms=tooltip_delay_ms,
+        theme_preset=theme_preset_raw,
+        text_format=text_format_raw,
+        compact_mode=compact_mode,
         warnings_enabled=warnings_enabled,
         segment_colors=segment_colors,
         time_warning_minutes=time_warning_minutes,
@@ -779,24 +659,6 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         daily_target_cards=daily_target_cards,
         target_review_minutes=target_review_minutes,
         pace_warnings_enabled=pace_warnings_enabled,
-        pacing_strategy=pacing_strategy,
-        show_eta_confidence=show_eta_confidence,
-        warning_hysteresis_percent=warning_hysteresis_percent,
-        warning_cooldown_seconds=warning_cooldown_seconds,
-        display_preset=display_preset,
-        onboarding_completed=onboarding_completed,
-        quick_setup_enabled=quick_setup_enabled,
-        focus_mode=focus_mode,
-        reduced_motion=reduced_motion,
-        animated_updates=animated_updates,
-        show_segment_inline_labels=show_segment_inline_labels,
-        show_warning_badge=show_warning_badge,
-        completion_celebration=completion_celebration,
-        responsive_breakpoints=responsive_breakpoints,
-        warning_transition_animations=warning_transition_animations,
-        pinned_deck_views=pinned_deck_views,
-        auto_adjust_contrast=auto_adjust_contrast,
-        deck_profiles=deck_profiles,
         raw_config=normalized,
     )
 
@@ -820,17 +682,6 @@ def apply_config(mw, new_config: Dict[str, Any], *, notify: Optional[Callable[[L
 
     mw.addonManager.writeConfig(CONFIG_KEY, dict(new_config))
     return reload_settings(mw, notify=notify)
-
-
-def validate_config_payload(mw, payload: Dict[str, Any]) -> List[str]:
-    """Validate a config payload and return user-facing normalization errors."""
-
-    fake_mw = SimpleNamespace(
-        addonManager=SimpleNamespace(getConfig=lambda _key: dict(payload or {})),
-        col=getattr(mw, "col", None),
-    )
-    _, errors = load_settings(fake_mw)
-    return errors
 
 
 # Alias preserved for test fixtures and legacy imports.

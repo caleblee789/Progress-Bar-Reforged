@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from aqt import mw
@@ -21,12 +21,6 @@ from aqt.qt import (
     QWidget,
     Qt,
 )
-try:
-    from aqt.qt import QToolButton
-except Exception:  # pragma: no cover - test stub fallback
-    class QToolButton(QPushButton):  # type: ignore[misc,override]
-        def __init__(self, parent=None) -> None:
-            super().__init__("")
 
 try:
     from aqt.qt import QPainter, QPen, QSizePolicy  # type: ignore
@@ -84,35 +78,6 @@ from . import config
 HISTORY_PROGRESS_KEY = "progress_bar_history"
 
 
-def _qt_enum(container: Any, scoped_name: str, value_name: str, default: Any = None) -> Any:
-    scoped = getattr(container, scoped_name, None)
-    if scoped is not None and hasattr(scoped, value_name):
-        return getattr(scoped, value_name)
-    return getattr(container, value_name, default)
-
-
-def _message_box_button(value_name: str) -> Any:
-    return _qt_enum(QMessageBox, "StandardButton", value_name)
-
-
-def _focus_policy(value_name: str) -> Any:
-    return _qt_enum(Qt, "FocusPolicy", value_name)
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
     raw_history = profile.get(HISTORY_PROGRESS_KEY, [])
     if not isinstance(raw_history, list):
@@ -130,12 +95,11 @@ def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
         normalized.append(
             {
                 "day": day_int,
-                "cards": _safe_int(entry.get("cards", 0) or 0),
-                "avg_seconds": _safe_float(entry.get("avg_seconds", 0.0) or 0.0),
-                "again": _safe_float(entry.get("again", 0.0) or 0.0),
-                "retention": _safe_float(entry.get("retention", 0.0) or 0.0),
-                "super_mature_retention": _safe_float(entry.get("super_mature_retention", 0.0) or 0.0),
-                "warning_events": _safe_int(entry.get("warning_events", 0) or 0),
+                "cards": int(entry.get("cards", 0) or 0),
+                "avg_seconds": float(entry.get("avg_seconds", 0.0) or 0.0),
+                "again": float(entry.get("again", 0.0) or 0.0),
+                "retention": float(entry.get("retention", 0.0) or 0.0),
+                "super_mature_retention": float(entry.get("super_mature_retention", 0.0) or 0.0),
             }
         )
     return normalized
@@ -143,7 +107,7 @@ def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def format_history_day(day_stamp: int) -> str:
     try:
-        return datetime.fromtimestamp(day_stamp * 86400, tz=timezone.utc).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(day_stamp * 86400).strftime("%Y-%m-%d")
     except Exception:
         return str(day_stamp)
 
@@ -181,7 +145,6 @@ def calculate_today_history_entry(
     )
     avg_seconds = (thetime / cards) if cards else 0.0
 
-    warning_events = int((1 if again_rate >= 15.0 else 0) + (1 if retention < 80.0 else 0))
     return {
         "day": day_stamp,
         "cards": int(cards),
@@ -189,7 +152,6 @@ def calculate_today_history_entry(
         "again": float(again_rate),
         "retention": float(retention),
         "super_mature_retention": float(sm_retention),
-        "warning_events": warning_events,
     }
 
 
@@ -221,7 +183,7 @@ class SessionHistoryDialog(QDialog):
     def __init__(self, parent) -> None:
         super().__init__(parent)
         self.setWindowTitle("Progress Bar Session History")
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(560)
         self._history_data: List[Dict[str, Any]] = []
         self._palette = self._resolve_palette()
 
@@ -252,23 +214,7 @@ class SessionHistoryDialog(QDialog):
             # Test stubs may not expose signals; fall back to a no-op.
             pass
         controls.addWidget(self.range_selector)
-        self._retention_help = QToolButton()
-        if hasattr(self._retention_help, "setText"):
-            self._retention_help.setText("?")
-        if hasattr(self._retention_help, "setAccessibleName"):
-            self._retention_help.setAccessibleName("True retention help")
-        if hasattr(self._retention_help, "setAccessibleDescription"):
-            self._retention_help.setAccessibleDescription(
-                "Explains how the true retention metric is calculated."
-            )
-        self._retention_help.setToolTip("True retention = passed mature reviews / (passed + failed mature reviews).")
-        controls.addWidget(self._retention_help)
         layout.addLayout(controls)
-
-        self.summary_label = QLabel("")
-        self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet(f"color: {self._palette['secondary_text']}; font-weight: 600;")
-        layout.addWidget(self.summary_label)
 
         charts_layout = QVBoxLayout()
         charts_layout.setSpacing(8)
@@ -288,36 +234,16 @@ class SessionHistoryDialog(QDialog):
             palette=self._palette,
             accent=self._palette.get("tab_unselected_text", "#16a34a"),
         )
-        self.warning_chart = TrendChartWidget(
-            "Warning frequency",
-            palette=self._palette,
-            accent=self._palette.get("focus_border", "#ef4444"),
-        )
 
         charts_layout.addWidget(self.cards_chart)
         charts_layout.addWidget(self.again_chart)
         charts_layout.addWidget(self.retention_chart)
-        charts_layout.addWidget(self.warning_chart)
         layout.addLayout(charts_layout)
 
-        self.chart_summary_label = QLabel("")
-        self.chart_summary_label.setWordWrap(True)
-        self.chart_summary_label.setStyleSheet(f"color: {self._palette['secondary_text']};")
-        if hasattr(self.chart_summary_label, "setAccessibleName"):
-            self.chart_summary_label.setAccessibleName("Session history chart summary")
-        if hasattr(self.chart_summary_label, "setAccessibleDescription"):
-            self.chart_summary_label.setAccessibleDescription(
-                "Keyboard-readable summary of the visible session history charts."
-            )
-        focus_policy = _focus_policy("StrongFocus")
-        if focus_policy is not None and hasattr(self.chart_summary_label, "setFocusPolicy"):
-            self.chart_summary_label.setFocusPolicy(focus_policy)
-        layout.addWidget(self.chart_summary_label)
-
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(
-            ["Day", "Cards", "Avg s/card", "Again %", "True Retention %", "Super-mature %", "Warnings"]
+            ["Day", "Cards", "Avg s/card", "Again %", "True Retention %", "Super-mature %"]
         )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -330,10 +256,6 @@ class SessionHistoryDialog(QDialog):
         export_btn = QPushButton("Export CSV")
         export_btn.clicked.connect(self._export_csv)
         btn_row.addWidget(export_btn)
-
-        export_clear_btn = QPushButton("Export then Clear")
-        export_clear_btn.clicked.connect(self._export_then_clear)
-        btn_row.addWidget(export_clear_btn)
 
         clear_btn = QPushButton("Clear History")
         clear_btn.clicked.connect(self._clear_history)
@@ -414,7 +336,6 @@ class SessionHistoryDialog(QDialog):
             again_display = f"{float(entry.get('again', 0.0)):.2f}"
             retention_display = f"{float(entry.get('retention', 0.0)):.2f}"
             sm_retention_display = f"{float(entry.get('super_mature_retention', 0.0)):.2f}"
-            warning_display = str(int(entry.get("warning_events", 0)))
 
             values = [
                 day_display,
@@ -423,92 +344,34 @@ class SessionHistoryDialog(QDialog):
                 again_display,
                 retention_display,
                 sm_retention_display,
-                warning_display,
             ]
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 self.table.setItem(row_idx, col_idx, item)
 
         self.table.resizeColumnsToContents()
-        self._update_summary_row(filtered)
-
-    def _update_summary_row(self, filtered: List[Dict[str, Any]]) -> None:
-        if not hasattr(self.summary_label, "setText"):
-            return
-        if not filtered:
-            self.summary_label.setText("Summary: no history data yet.")
-            return
-
-        def _summary(days: int) -> str:
-            subset = filtered if days <= 0 else filtered[:days]
-            if not subset:
-                return f"{days}d: n/a"
-            avg_cards = sum(float(x.get("cards", 0)) for x in subset) / len(subset)
-            avg_again = sum(float(x.get("again", 0.0)) for x in subset) / len(subset)
-            avg_ret = sum(float(x.get("retention", 0.0)) for x in subset) / len(subset)
-            trend = "flat"
-            if len(subset) >= 2:
-                first = float(subset[-1].get("cards", 0))
-                last = float(subset[0].get("cards", 0))
-                if last > first:
-                    trend = "up"
-                elif last < first:
-                    trend = "down"
-            label = "All" if days <= 0 else f"{days}d"
-            return f"{label}: cards/day {avg_cards:.1f}, Again {avg_again:.1f}%, true retention {avg_ret:.1f}% ({trend})"
-
-        self.summary_label.setText("Summary — " + " | ".join([_summary(7), _summary(30), _summary(0)]))
 
     def _update_charts(self) -> None:
         filtered = list(reversed(self._filtered_history()))  # oldest to newest for plotting
         cards_points: List[Tuple[int, float]] = []
         again_points: List[Tuple[int, float]] = []
         retention_points: List[Tuple[int, float]] = []
-        warning_points: List[Tuple[int, float]] = []
 
         for entry in filtered:
             day = int(entry.get("day", 0))
             cards_points.append((day, float(entry.get("cards", 0))))
             again_points.append((day, float(entry.get("again", 0.0))))
             retention_points.append((day, float(entry.get("retention", 0.0))))
-            warning_points.append((day, float(entry.get("warning_events", 0))))
 
         self.cards_chart.set_points(cards_points)
         self.again_chart.set_points(again_points)
         self.retention_chart.set_points(retention_points)
-        self.warning_chart.set_points(warning_points)
-        self._update_chart_summary(filtered)
-
-    def _update_chart_summary(self, filtered: List[Dict[str, Any]]) -> None:
-        if not hasattr(self, "chart_summary_label"):
-            return
-        if not filtered:
-            summary = "Chart summary: no visible history data."
-        else:
-            days = len(filtered)
-            total_cards = sum(float(entry.get("cards", 0)) for entry in filtered)
-            avg_cards = total_cards / max(days, 1)
-            latest = filtered[-1]
-            latest_day = format_history_day(int(latest.get("day", 0)))
-            latest_cards = int(latest.get("cards", 0))
-            latest_again = float(latest.get("again", 0.0))
-            latest_retention = float(latest.get("retention", 0.0))
-            warnings = int(sum(int(entry.get("warning_events", 0)) for entry in filtered))
-            summary = (
-                f"Chart summary: {days} day{'s' if days != 1 else ''} visible; "
-                f"average {avg_cards:.1f} cards/day; latest {latest_day}: "
-                f"{latest_cards} cards, Again {latest_again:.1f}%, true retention {latest_retention:.1f}%; "
-                f"{warnings} warning event{'s' if warnings != 1 else ''}."
-            )
-        self.chart_summary_label.setText(summary)
-        if hasattr(self.chart_summary_label, "setToolTip"):
-            self.chart_summary_label.setToolTip(summary)
 
     def _on_range_changed(self) -> None:
         self._populate_table()
         self._update_charts()
 
-    def _export_csv(self) -> bool:
+    def _export_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Session History",
@@ -516,12 +379,12 @@ class SessionHistoryDialog(QDialog):
             "CSV Files (*.csv);;All Files (*.*)",
         )
         if not path:
-            return False
+            return
 
         try:
             with open(path, "w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
-                writer.writerow(["day", "cards", "avg_seconds", "again_percent", "retention_percent", "super_mature_retention", "warning_events"])
+                writer.writerow(["day", "cards", "avg_seconds", "again_percent", "retention_percent", "super_mature_retention"])
                 for entry in self._filtered_history():
                     writer.writerow(
                         [
@@ -531,14 +394,11 @@ class SessionHistoryDialog(QDialog):
                             f"{float(entry.get('again', 0.0)):.2f}",
                             f"{float(entry.get('retention', 0.0)):.2f}",
                             f"{float(entry.get('super_mature_retention', 0.0)):.2f}",
-                            int(entry.get("warning_events", 0)),
                         ]
                     )
             QMessageBox.information(self, "Export complete", f"History exported to:\n{path}")
-            return True
         except Exception as err:
             QMessageBox.warning(self, "Export failed", f"Could not export history:\n{err}")
-            return False
 
     def _clear_history(self) -> None:
         if mw.pm is None:
@@ -547,10 +407,10 @@ class SessionHistoryDialog(QDialog):
             self,
             "Clear history",
             "Remove all stored progress history?",
-            _message_box_button("Yes") | _message_box_button("No"),
-            _message_box_button("No"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if confirm != _message_box_button("Yes"):
+        if confirm != QMessageBox.StandardButton.Yes:
             return
 
         profile = getattr(mw.pm, "profile", None)
@@ -558,10 +418,6 @@ class SessionHistoryDialog(QDialog):
             profile[HISTORY_PROGRESS_KEY] = []
             mw.pm.save()
         self._reload()
-
-    def _export_then_clear(self) -> None:
-        if self._export_csv():
-            self._clear_history()
 
     def _resolve_palette(self) -> Dict[str, str]:
         try:
@@ -601,32 +457,10 @@ class TrendChartWidget(QWidget):
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
         if hasattr(self, "setAutoFillBackground"):
             self.setAutoFillBackground(True)
-        if hasattr(self, "setAccessibleName"):
-            self.setAccessibleName(title)
-        focus_policy = _focus_policy("StrongFocus")
-        if focus_policy is not None and hasattr(self, "setFocusPolicy"):
-            self.setFocusPolicy(focus_policy)
-        self._sync_accessible_summary()
 
     def set_points(self, points: Sequence[Tuple[int, float]]) -> None:
         self._points = list(points)
-        self._sync_accessible_summary()
         self.update()
-
-    def _sync_accessible_summary(self) -> None:
-        if not self._points:
-            summary = f"{self._title}: no data yet."
-        else:
-            values = [point[1] for point in self._points]
-            summary = (
-                f"{self._title}: {len(values)} point{'s' if len(values) != 1 else ''}, "
-                f"from {format_history_day(int(self._points[0][0]))} to {format_history_day(int(self._points[-1][0]))}, "
-                f"minimum {min(values):.1f}, maximum {max(values):.1f}, latest {values[-1]:.1f}."
-            )
-        if hasattr(self, "setAccessibleDescription"):
-            self.setAccessibleDescription(summary)
-        if hasattr(self, "setToolTip"):
-            self.setToolTip(summary)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         painter = QPainter(self)

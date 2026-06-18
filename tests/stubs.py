@@ -123,11 +123,23 @@ class Qt:
     class ToolButtonStyle:
         ToolButtonTextBesideIcon = 1
 
+    class CursorShape:
+        PointingHandCursor = 1
+
     class WidgetAttribute:
         WA_DeleteOnClose = 1
 
     class FocusPolicy:
         StrongFocus = 1
+
+    class MouseButton:
+        LeftButton = 1
+        RightButton = 2
+
+    class Key:
+        Key_Return = 16777220
+        Key_Enter = 16777221
+        Key_Space = 32
 
     class ItemDataRole:
         UserRole = 32
@@ -240,6 +252,9 @@ class QWidget:
 
     def setFocusPolicy(self, policy: Any) -> None:
         self._focus_policy = policy
+
+    def setCursor(self, cursor: Any) -> None:
+        self._cursor = cursor
 
     def deleteLater(self) -> None:
         self._deleted = True
@@ -645,6 +660,10 @@ class QTreeWidget(QWidget):
     def expandToDepth(self, depth: int) -> None:
         self._expanded_to = depth
 
+    def resizeColumnToContents(self, column: int) -> None:
+        self._resized_columns = getattr(self, "_resized_columns", [])
+        self._resized_columns.append(column)
+
 
 class QTreeWidgetItem:
     def __init__(self, parent: Optional[Any] = None) -> None:
@@ -903,12 +922,27 @@ class QObject(QWidget):
 class QEvent:
     class Type:
         ToolTip = 0
+        MouseButtonRelease = 1
+        ContextMenu = 2
+        KeyPress = 3
 
-    def __init__(self, type_value: int = 0) -> None:
+    def __init__(self, type_value: int = 0, *, button: Optional[int] = None, key: Optional[int] = None) -> None:
         self._type = type_value
+        self._button = button
+        self._key = key
+        self._accepted = False
 
     def type(self) -> int:
         return self._type
+
+    def button(self) -> Optional[int]:
+        return self._button
+
+    def key(self) -> Optional[int]:
+        return self._key
+
+    def accept(self) -> None:
+        self._accepted = True
 
 
 class QHelpEvent(QEvent):

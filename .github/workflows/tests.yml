@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.10", "3.13"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,4 +26,7 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Run tests
         run: |
-          pytest
+          pytest -q
+      - name: Build addon package
+        run: |
+          python scripts/package_addon.py
