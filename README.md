@@ -5,6 +5,8 @@ Progress Bar Time Left adds a dockable progress bar to Anki's reviewer. It shows
 
 The add-on builds on Glutanimate's original Progress Bar and Carlos Duarte's More Decks Stats and Time Left, then adds ETA estimates, deck breakdowns, session history data, keyboard control, and a compact settings dialog.
 
+Current release: **v1.0.1**. Install from AnkiWeb with code `1097423555`, or download `progress_bar_time_left.ankiaddon` from the GitHub release artifacts.
+
 Features
 --------
 
@@ -12,9 +14,10 @@ Features
 * **Current-deck counting** - track active New/Learning/Review work, completed cards, percentage done, speed, time spent, time left, and ETA.
 * **Deck breakdown dialog** - click the bar to inspect per-deck actionable and buried counts for New/Learning/Review cards, with ETAs once today's pace is known.
 * **Retention metrics** - Stats mode shows Again rate, Retention, optional super-mature retention, and yesterday comparisons.
-* **Appearance controls** - choose top or bottom docking and Auto, Light, or Dark theme.
+* **Display and appearance controls** - show the bar during reviews only or on both the deck browser and review screens, choose top or bottom docking, and use Auto, Light, or Dark theme.
 * **Session history data** - preserve daily pace metrics for compatibility with existing profiles.
 * **Keyboard and persistence** - toggle the bar with a configurable shortcut and preserve same-day progress across Anki restarts/profile reloads.
+* **Release polish** - simplified settings, cleaner light UI, preserved dark colors, and release-ready package metadata.
 
 Compatibility
 -------------
@@ -49,7 +52,7 @@ AnkiWeb page: <https://ankiweb.net/shared/info/1097423555>
 Usage
 -----
 
-* The progress bar appears as a dock in Anki's main window, top-docked by default.
+* The progress bar appears as a dock in Anki's main window, top-docked by default, on both the deck browser and review screens.
 * Press the toggle shortcut, `Ctrl+G` by default (`Meta+G` on macOS), to show or hide it.
 * Hover the bar for context-aware explanations of the current metrics.
 * Click the bar, or focus it and press Enter/Space, to open the deck breakdown.
@@ -58,14 +61,14 @@ Usage
 Configuration
 -------------
 
-Most users should use **Tools -> Progress Bar Settings**. The settings dialog is intentionally small: enable the bar, choose a mode, choose top/bottom position, choose a theme, and set the shortcut.
+Most users should use **Tools -> Progress Bar Settings**. The settings dialog is intentionally small: enable the bar, choose where it appears, choose a mode, optionally show SMTR, choose top/bottom position, choose a theme, and set the shortcut.
 
 You can also edit JSON from **Tools -> Add-ons -> Progress Bar Time Left -> Config**. After manual edits, restart Anki.
 
 Useful configuration keys:
 
-* **Core** - `progress_bar_enabled`, `mode`, `dock_area`, `theme`, `toggle_shortcut`.
-* **Modes** - `simple` shows count/percent, `time_left` adds ETA and review time, and `stats` keeps the rich metric label by default.
+* **Core** - `progress_bar_enabled`, `display_location`, `mode`, `show_super_mature_retention`, `dock_area`, `theme`, `toggle_shortcut`.
+* **Modes** - `simple` shows count/percent, `time_left` adds ETA and review time, and `stats` keeps the rich metric label by default with optional SMTR.
 * **Compatibility** - older advanced JSON keys are tolerated, but the supported settings surface is intentionally lightweight.
 
 See [docs/config.md](docs/config.md) for more detail.

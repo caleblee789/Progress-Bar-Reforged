@@ -3,6 +3,7 @@
 The supported settings surface is intentionally small:
 
 - `progress_bar_enabled` (default: `true`)
+- `display_location` (default: `review_and_home`)
 - `mode` (default: `stats`)
 - `dock_area` (default: `top`)
 - `theme` (default: `auto`)
