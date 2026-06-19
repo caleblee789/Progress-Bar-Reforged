@@ -362,7 +362,7 @@ def test_progress_bar_keyboard_activation_and_accessibility(addon_module):
     progress_ui.set_click_handler(lambda: calls.append("opened"))
 
     assert progress_ui.progressBar._focus_policy == Qt.FocusPolicy.StrongFocus
-    assert progress_ui.progressBar._accessible_name == "Progress Bar Time Left"
+    assert progress_ui.progressBar._accessible_name == "Progress_Bar_Reforged"
     assert "deck breakdown" in progress_ui.progressBar._accessible_description
 
     key_event = QEvent(QEvent.Type.KeyPress, key=Qt.Key.Key_Return)

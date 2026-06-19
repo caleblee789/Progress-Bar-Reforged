@@ -27,7 +27,7 @@ def _load_meta() -> dict[str, Any]:
 def _manifest(meta: dict[str, Any], mod_time: int) -> dict[str, Any]:
     manifest = {
         "package": PACKAGE_ID,
-        "name": meta.get("name", "Progress Bar Time Left"),
+        "name": meta.get("name", "Progress_Bar_Reforged"),
         "mod": mod_time,
         "min_point_version": int(meta.get("min_point_version", 49)),
         "max_point_version": int(meta.get("max_point_version", 260500)),

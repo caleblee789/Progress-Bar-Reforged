@@ -1,7 +1,7 @@
-Progress Bar Time Left for Anki
+Progress_Bar_Reforged for Anki
 ===============================
 
-Progress Bar Time Left adds a dockable progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
+Progress_Bar_Reforged adds a dockable progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
 
 The add-on builds on Glutanimate's original Progress Bar and Carlos Duarte's More Decks Stats and Time Left, then adds ETA estimates, deck breakdowns, session history data, keyboard control, and a compact settings dialog.
 
@@ -63,7 +63,7 @@ Configuration
 
 Most users should use **Tools -> Progress Bar Settings**. The settings dialog is intentionally small: enable the bar, choose where it appears, choose a mode, optionally show SMTR, choose top/bottom position, choose a theme, and set the shortcut.
 
-You can also edit JSON from **Tools -> Add-ons -> Progress Bar Time Left -> Config**. After manual edits, restart Anki.
+You can also edit JSON from **Tools -> Add-ons -> Progress_Bar_Reforged -> Config**. After manual edits, restart Anki.
 
 Useful configuration keys:
 
