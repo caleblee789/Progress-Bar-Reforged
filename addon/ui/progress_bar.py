@@ -306,7 +306,7 @@ def init_progress_bar() -> None:
     progressBar.setInvertedAppearance(config.settings.invert_progress)
     progressBar.setOrientation(config.settings.orientation)
     progressBar.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-    progressBar.setAccessibleName("Progress Bar Time Left")
+    progressBar.setAccessibleName("Progress_Bar_Reforged")
     progressBar.setAccessibleDescription(
         "Shows current review progress. Press Enter or Space to open the deck breakdown."
     )
