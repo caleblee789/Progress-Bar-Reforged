@@ -1147,13 +1147,14 @@ class AddonManagerStub:
         self.config = config or {}
         self.get_calls: List[str] = []
         self.write_calls: List[Tuple[str, Dict[str, Any]]] = []
+        self.missing_package_ids = {"1097423555"}
 
     def getConfig(self, name: str) -> Dict[str, Any]:
         self.get_calls.append(name)
         return dict(self.config)
 
     def writeConfig(self, name: str, config: Dict[str, Any]) -> None:
-        if name.split(".", 1)[0] == "addon":
+        if name in self.missing_package_ids or name.split(".", 1)[0] == "addon":
             raise FileNotFoundError("[Errno 2] No such file or directory: 'addons21/addon/meta.json'")
         self.write_calls.append((name, dict(config)))
         self.config = dict(config)

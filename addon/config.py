@@ -8,7 +8,7 @@ from aqt.qt import QColor, QPalette, QStyle, QStyleFactory, Qt
 
 from .nightmode import isnightmode
 
-PACKAGE_ID = "1097423555"
+PACKAGE_ID = "1511983907"
 CONFIG_KEY = PACKAGE_ID
 LEGACY_WARNING_KEYS = {
     "warnings_enabled",
