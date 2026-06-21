@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import json
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, List, Sequence, Tuple
@@ -137,8 +139,8 @@ def test_config_persistence_uses_packaged_addon_id(mw):
 
     addon_config.apply_config(mw, {"mode": "simple"})
 
-    assert mw.addonManager.get_calls[-1] == "1097423555"
-    assert [name for name, _ in mw.addonManager.write_calls] == ["1097423555", "1097423555"]
+    assert mw.addonManager.get_calls[-1] == "1511983907"
+    assert [name for name, _ in mw.addonManager.write_calls] == ["1511983907", "1511983907"]
 
 
 def test_settings_dialog_save_uses_packaged_addon_id(addon_module):
@@ -150,7 +152,18 @@ def test_settings_dialog_save_uses_packaged_addon_id(addon_module):
 
     assert dialog._accepted is True
     assert mod.mw.addonManager.write_calls
-    assert all(name == "1097423555" for name, _ in mod.mw.addonManager.write_calls)
+    assert all(name == "1511983907" for name, _ in mod.mw.addonManager.write_calls)
+
+
+def test_settings_dialog_save_avoids_obsolete_addon_id(addon_module):
+    mod = addon_module
+
+    dialog = mod.ProgressBarConfigDialog(mod.mw)
+    dialog.progress_bar_enabled_cb.setChecked(False)
+    dialog._save_and_close()
+
+    assert dialog._accepted is True
+    assert "1097423555" not in [name for name, _ in mod.mw.addonManager.write_calls]
 
 
 def test_smtr_is_hidden_by_default_and_can_be_enabled(addon_module):
@@ -490,6 +503,17 @@ def test_package_builder_includes_donate_asset():
     packaged_paths = {path.relative_to(package_addon.ADDON_DIR).as_posix() for path in package_addon._iter_package_files()}
 
     assert "assets/buy_me_a_coffee.png" in packaged_paths
+
+
+def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
+    from scripts import package_addon
+
+    output = package_addon.build_package(tmp_path / "progress_bar_time_left.ankiaddon", mod_time=123)
+
+    with zipfile.ZipFile(output) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+
+    assert manifest["package"] == "1511983907"
 
 
 def test_tools_menu_only_exposes_progress_bar_settings(addon_module):

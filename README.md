@@ -5,7 +5,7 @@ Progress_Bar_Reforged adds a dockable progress bar to Anki's reviewer. It shows 
 
 The add-on builds on Glutanimate's original Progress Bar and Carlos Duarte's More Decks Stats and Time Left, then adds ETA estimates, deck breakdowns, session history data, keyboard control, and a compact settings dialog.
 
-Current release: **v1.0.1**. Install from AnkiWeb with code `1097423555`, or download `progress_bar_time_left.ankiaddon` from the GitHub release artifacts.
+Current release: **v1.0.2**. Install from AnkiWeb with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the GitHub release artifacts.
 
 Features
 --------
@@ -30,10 +30,10 @@ Installation
 ### From AnkiWeb
 
 1. In Anki, open **Tools -> Add-ons -> Get Add-ons...**
-2. Enter code `1097423555`.
+2. Enter code `1511983907`.
 3. Restart Anki.
 
-AnkiWeb page: <https://ankiweb.net/shared/info/1097423555>
+AnkiWeb page: <https://ankiweb.net/shared/info/1511983907>
 
 ### From a Release Package
 

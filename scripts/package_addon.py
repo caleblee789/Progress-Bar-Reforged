@@ -11,7 +11,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 ADDON_DIR = ROOT / "addon"
 DEFAULT_OUTPUT = ROOT / "dist" / "progress_bar_time_left.ankiaddon"
-PACKAGE_ID = "1097423555"
+PACKAGE_ID = "1511983907"
 
 EXCLUDED_DIRS = {"__pycache__"}
 EXCLUDED_NAMES = {".DS_Store", "meta.json", "manifest.json"}
