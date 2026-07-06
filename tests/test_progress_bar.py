@@ -2,12 +2,53 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
+import re
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, List, Sequence, Tuple
 
 from tests.stubs import QApplication, DeckNode, QFileDialog, QPainter, QPalette, QRect
+
+
+def _hex_to_rgb(color: str) -> Tuple[float, float, float]:
+    assert color.startswith("#") and len(color) == 7
+    return tuple(int(color[index : index + 2], 16) / 255 for index in (1, 3, 5))  # type: ignore[return-value]
+
+
+def _relative_luminance(rgb: Tuple[float, float, float]) -> float:
+    def channel(value: float) -> float:
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (channel(value) for value in rgb)
+    return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    foreground_luminance = _relative_luminance(_hex_to_rgb(foreground))
+    background_luminance = _relative_luminance(_hex_to_rgb(background))
+    lighter = max(foreground_luminance, background_luminance)
+    darker = min(foreground_luminance, background_luminance)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _contrast_ratio_over(foreground: str, overlay: str, backdrop: str) -> float:
+    match = re.fullmatch(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*([0-9.]+)\)", overlay)
+    if match is None:
+        return _contrast_ratio(foreground, overlay)
+    red, green, blue = (int(match.group(index)) / 255 for index in (1, 2, 3))
+    alpha = float(match.group(4))
+    backdrop_rgb = _hex_to_rgb(backdrop)
+    blended = tuple(
+        (channel * alpha) + (backdrop_channel * (1 - alpha))
+        for channel, backdrop_channel in zip((red, green, blue), backdrop_rgb)
+    )
+    foreground_luminance = _relative_luminance(_hex_to_rgb(foreground))
+    background_luminance = _relative_luminance(blended)  # type: ignore[arg-type]
+    lighter = max(foreground_luminance, background_luminance)
+    darker = min(foreground_luminance, background_luminance)
+    return (lighter + 0.05) / (darker + 0.05)
 
 
 class SequenceDB:
@@ -26,6 +67,21 @@ class SequenceDB:
         if self.first_rows:
             return self.first_rows.pop(0)
         return None
+
+
+class SQLiteDB:
+    def __init__(self) -> None:
+        self.connection = sqlite3.connect(":memory:")
+
+    def execute(self, query: str, params: Sequence[Any] = ()) -> None:
+        self.connection.execute(query, tuple(params))
+        self.connection.commit()
+
+    def all(self, query: str, *params: Any):
+        return self.connection.execute(query, params).fetchall()
+
+    def first(self, query: str, *params: Any):
+        return self.connection.execute(query, params).fetchone()
 
 
 def seed_progress_counts(mod, done: int = 2, remain: int = 8) -> None:
@@ -102,6 +158,52 @@ def test_config_coercion_and_normalization(addon_module):
     assert mod.settings.tz == -3
     assert mod.settings.display_location == "review_and_home"
     assert "time_warning_minutes" not in mod.settings.raw_config
+
+
+def test_malformed_config_is_repaired_without_stylesheet_injection(mw):
+    from addon import config as addon_config
+
+    settings = addon_config.apply_config(
+        mw,
+        {
+            "appearance": ["invalid"],
+            "segment_colors": "invalid",
+            "max_width": "20px; color: red",
+            "bar_height": "-1px",
+            "padding": "1.5em",
+            "opacity": "nan",
+        },
+    )
+
+    assert settings.max_width == ""
+    assert settings.bar_height == ""
+    assert settings.padding == "1.5em"
+    assert settings.opacity == 100
+    assert settings.raw_config["appearance"]["day"]["foreground"] == "#0e7490"
+    assert settings.raw_config["segment_colors"] == {
+        "new": "#378ba5",
+        "learning": "#aa7926",
+        "review": "#41965a",
+    }
+    assert "appearance must be an object; using defaults." in addon_config.validation_errors
+    assert "segment_colors must be an object; using defaults." in addon_config.validation_errors
+    assert addon_config._coerce_float("nan", 2.5) == 2.5
+
+
+def test_settings_cancel_and_apply_have_standard_persistence_semantics(addon_module):
+    mod = addon_module
+    mod._apply_config({"mode": "stats"})
+
+    cancelled = mod.ProgressBarConfigDialog(mod.mw)
+    cancelled.mode_combo.setCurrentIndex(cancelled.mode_combo.findData("simple"))
+    cancelled.reject()
+    assert mod.mw.addonManager.config["mode"] == "stats"
+
+    applied = mod.ProgressBarConfigDialog(mod.mw)
+    applied.mode_combo.setCurrentIndex(applied.mode_combo.findData("time_left"))
+    applied._apply_without_closing()
+    applied.reject()
+    assert mod.mw.addonManager.config["mode"] == "time_left"
 
 
 def test_mode_and_theme_validation(mw):
@@ -216,9 +318,9 @@ def test_theme_resolution_controls_bar_and_dialog_palettes(addon_module):
 
     mod._apply_config({"theme": "light"})
     assert mod.settings.active_theme.background == "#e7edf3"
-    assert mod.settings.active_theme.foreground == "#12a8cc"
+    assert mod.settings.active_theme.foreground == "#0e7490"
     assert mod._ui_palette()["window_bg"] == "#f7f9fc"
-    assert mod._ui_palette()["muted_row_text"] == "#7a8699"
+    assert mod._ui_palette()["muted_row_text"] == "#667085"
     assert "summary_bg" in mod._ui_palette()
     assert "segment_new" in mod._ui_palette()
 
@@ -227,7 +329,7 @@ def test_theme_resolution_controls_bar_and_dialog_palettes(addon_module):
     assert mod.settings.active_theme.background == "rgba(39, 40, 40, 1)"
     assert mod._ui_palette()["window_bg"] == "#0b1220"
     assert mod._ui_palette()["card_bg"] == "#111827"
-    assert mod._ui_palette()["muted_row_text"] == "#64748b"
+    assert mod._ui_palette()["muted_row_text"] == "#94a3b8"
     assert "summary_bg" in mod._ui_palette()
     assert "segment_review" in mod._ui_palette()
 
@@ -247,11 +349,303 @@ def test_release_polish_styles_are_applied(addon_module):
     assert "font-weight: 600;" in mod.settings.default_stylesheet
     assert "min-height: 22px;" in mod.settings.default_stylesheet
     assert "#111827" in mod.settings.default_stylesheet
-    assert "#12a8cc" in mod.settings.default_stylesheet
+    assert "#0e7490" in mod.settings.default_stylesheet
     assert "min-height: 20px;" in dialog.styleSheet()
     assert "border-color: #5b8def;" in dialog.styleSheet()
-    assert row.styleSheet() == "border-bottom: 1px solid #e4eaf2;"
+    assert row.styleSheet() == "border-bottom: 1px solid #7c8ba1;"
     assert "min-height: 20px;" in dialog.shortcut_field._editor.styleSheet()
+
+
+def test_settings_dialog_light_theme_styles_shortcut_and_buttons(addon_module):
+    mod = addon_module
+    from tests.stubs import QPalette
+
+    mod._apply_config({"theme": "light"})
+    dialog = mod.ProgressBarConfigDialog(mod.mw)
+
+    assert "#f7f9fc" in dialog.styleSheet()
+    assert "#0b1220" not in dialog.styleSheet()
+    assert "#0f172a" not in dialog.shortcut_field._editor.styleSheet()
+    assert "QKeySequenceEdit#shortcutRecorder QToolButton" in dialog.shortcut_field._editor.styleSheet()
+    assert "QKeySequenceEdit#shortcutRecorder QLineEdit" in dialog.shortcut_field._editor.styleSheet()
+    assert "background: #ffffff;" in dialog.shortcut_field._editor.styleSheet()
+    assert "QKeySequenceEdit#shortcutRecorder:active" in dialog.shortcut_field._editor.styleSheet()
+    assert "background-color: #ffffff;" in dialog.shortcut_field._editor.styleSheet()
+    assert dialog.shortcut_field._editor.palette().color(QPalette.ColorRole.Base).name() == "#ffffff"
+    assert dialog.shortcut_field._editor.palette().color(QPalette.ColorRole.Text).name() == "#1f2937"
+    native_child = dialog.shortcut_field._editor._native_editor_child
+    assert native_child.palette().color(QPalette.ColorRole.Base).name() == "#ffffff"
+    assert native_child._auto_fill_background is True
+    assert "QToolButton#shortcutResetButton" in dialog.shortcut_field._reset_btn.styleSheet()
+    assert "background: #f5f7fb;" in dialog.shortcut_field._reset_btn.styleSheet()
+    assert "background: #eef2f7;" in dialog.styleSheet()
+    for combo in (dialog.display_location_combo, dialog.mode_combo, dialog.dock_area_combo, dialog.theme_combo):
+        assert "background: #ffffff;" in combo.styleSheet()
+        assert "#0f172a" not in combo.styleSheet()
+
+
+def test_settings_dialog_cards_primary_action_and_checked_states_use_accent(addon_module):
+    mod = addon_module
+    mod._apply_config({"theme": "light"})
+    dialog = mod.ProgressBarConfigDialog(mod.mw)
+    palette = mod._ui_palette("light")
+
+    style = dialog.styleSheet()
+    assert "QFrame#settingsHeader" in style
+    assert "QFrame#settingsCard" in style
+    assert "QFrame#settingsFooter" in style
+    assert "QPushButton#primaryButton" in style
+    assert f"background: {palette['accent']};" in style
+    assert f"border-color: {palette['accent']};" in style
+    assert dialog._save_btn.objectName() == "primaryButton"
+
+
+def test_settings_dialog_auto_theme_rethemes_shortcut_native_palette(addon_module):
+    mod = addon_module
+    from aqt.theme import theme_manager
+    from tests.stubs import QPalette
+
+    theme_manager.night_mode = True
+    mod._apply_config({"theme": "auto"})
+    dialog = mod.ProgressBarConfigDialog(mod.mw)
+    assert dialog.shortcut_field._editor.palette().color(QPalette.ColorRole.Base).name() == "#0f172a"
+
+    theme_manager.night_mode = False
+    dialog.apply_theme()
+    assert dialog.shortcut_field._editor.palette().color(QPalette.ColorRole.Base).name() == "#ffffff"
+    assert "QKeySequenceEdit#shortcutRecorder:focus" in dialog.shortcut_field._editor.styleSheet()
+    assert "QKeySequenceEdit#shortcutRecorder:active" in dialog.shortcut_field._editor.styleSheet()
+
+
+def test_shortcut_recorder_only_records_after_click_and_disarms(addon_module):
+    mod = addon_module
+    from tests.stubs import QEvent, QKeySequence, Qt
+
+    dialog = mod.ProgressBarConfigDialog(mod.mw)
+    field = dialog.shortcut_field
+    recorder_filter = field._recorder_filter
+
+    assert field._editor._focus_policy == Qt.FocusPolicy.ClickFocus
+    assert field._editor._maximum_sequence_length == 1
+    assert recorder_filter.eventFilter(field._editor, QEvent(QEvent.Type.FocusIn)) is True
+    assert field._recording_armed is False
+
+    assert recorder_filter.eventFilter(
+        field._editor,
+        QEvent(QEvent.Type.MouseButtonPress, button=Qt.MouseButton.LeftButton),
+    ) is False
+    assert field._recording_armed is True
+    assert field._record_hint.text() == "Press shortcut keys."
+
+    field._editor.setFocus()
+    field._editor.setKeySequence(QKeySequence("Meta+J"))
+
+    assert field._recording_armed is False
+    assert field._editor.hasFocus() is False
+    assert field._record_hint.text() == "Click, then press keys."
+    assert field.value() == "Meta+J"
+
+
+def test_shortcut_conflicts_include_actions_and_other_shortcuts(addon_module):
+    from tests.stubs import QAction, QKeySequence, QShortcut
+
+    mod = addon_module
+    action = QAction("Sync")
+    action.setShortcut(QKeySequence("Meta+S"))
+    other_shortcut = QShortcut(QKeySequence("Meta+K"), mod.mw)
+
+    def find_children(klass):
+        if klass is QAction:
+            return [action]
+        if klass is QShortcut:
+            return [mod.progress_ui.toggle_shortcut, other_shortcut]
+        return []
+
+    mod.mw.findChildren = find_children
+    field = mod.ShortcutField("Meta+G", mod._ui_palette("light"))
+
+    field.set_shortcut("Meta+S")
+    assert field.has_conflict() is True
+    assert field._warning_label.text() == "Conflicts with Sync."
+
+    field.set_shortcut("Meta+K")
+    assert field.has_conflict() is True
+    assert field._warning_label.text() == "Conflicts with another shortcut."
+
+    field.set_shortcut(mod.settings.toggle_shortcut)
+    assert field.has_conflict() is False
+
+
+def test_dialog_theme_tokens_keep_text_contrast(addon_module):
+    mod = addon_module
+
+    checked_pairs = [
+        ("primary_text", "window_bg"),
+        ("secondary_text", "window_bg"),
+        ("muted_text", "window_bg"),
+        ("helper_text", "window_bg"),
+        ("summary_title_text", "summary_bg"),
+        ("summary_text", "summary_bg"),
+        ("button_text", "button_bg"),
+        ("checkbox_text", "window_bg"),
+        ("muted_row_text", "card_bg"),
+        ("eta_muted_text", "card_bg"),
+        ("chip_new_text", "chip_new_bg"),
+        ("chip_learning_text", "chip_learning_bg"),
+        ("chip_review_text", "chip_review_bg"),
+        ("accent_text", "accent"),
+        ("danger_text", "danger_bg"),
+        ("tooltip_text", "tooltip_bg"),
+    ]
+    for theme in ("light", "dark"):
+        palette = mod._ui_palette(theme)
+        for foreground_key, background_key in checked_pairs:
+            assert _contrast_ratio(palette[foreground_key], palette[background_key]) >= 4.5
+
+        assert _contrast_ratio(palette["disabled_text"], palette["disabled_bg"]) >= 4.5
+        assert _contrast_ratio(palette["field_border"], palette["field_bg"]) >= 3.0
+        assert _contrast_ratio(palette["button_border"], palette["button_bg"]) >= 3.0
+        assert _contrast_ratio(palette["focus_border"], palette["field_bg"]) >= 3.0
+        assert _contrast_ratio(palette["scrollbar_handle"], palette["scrollbar_bg"]) >= 3.0
+        assert _contrast_ratio(palette["chart_cards"], palette["card_bg"]) >= 3.0
+        assert _contrast_ratio(palette["chart_again"], palette["card_bg"]) >= 3.0
+        assert _contrast_ratio(palette["chart_retention"], palette["card_bg"]) >= 3.0
+        assert _contrast_ratio(palette["danger_text"], palette["card_bg"]) >= 4.5
+        for border_key, background_key in (
+            ("tab_border", "tab_selected_bg"),
+            ("card_border", "card_bg"),
+            ("summary_border", "summary_bg"),
+            ("chip_border", "chip_muted_bg"),
+            ("chip_new_border", "chip_new_bg"),
+            ("chip_learning_border", "chip_learning_bg"),
+            ("chip_review_border", "chip_review_bg"),
+            ("row_divider", "card_bg"),
+            ("tooltip_border", "tooltip_bg"),
+            ("danger_border", "danger_bg"),
+            ("segment_empty", "segment_track"),
+            ("segment_new", "segment_track"),
+            ("segment_learning", "segment_track"),
+            ("segment_review", "segment_track"),
+        ):
+            if palette[background_key].startswith("rgba"):
+                ratio = _contrast_ratio_over(
+                    palette[border_key], palette[background_key], palette["card_bg"]
+                )
+            else:
+                ratio = _contrast_ratio(palette[border_key], palette[background_key])
+            assert ratio >= 3.0, (theme, border_key, background_key, ratio)
+        for accent_background in ("accent", "accent_hover", "accent_pressed"):
+            assert _contrast_ratio(palette["accent_text"], palette[accent_background]) >= 4.5
+        for danger_background in ("danger_bg", "danger_hover_bg", "danger_pressed_bg"):
+            assert _contrast_ratio(palette["danger_text"], palette[danger_background]) >= 4.5
+        assert _contrast_ratio_over(
+            palette["chip_muted_text"],
+            palette["chip_muted_bg"],
+            palette["card_bg"],
+        ) >= 4.5
+        assert _contrast_ratio_over(
+            palette["table_selection_text"],
+            palette["table_selection_bg"],
+            palette["card_bg"],
+        ) >= 4.5
+
+
+def test_shortcut_native_palette_covers_active_inactive_and_disabled_groups(addon_module):
+    mod = addon_module
+    mod._apply_config({"theme": "light"})
+    dialog = mod.ProgressBarConfigDialog(mod.mw)
+    palette = dialog.shortcut_field._editor.palette()
+    colors = mod._ui_palette("light")
+
+    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+        assert palette.color(group, QPalette.ColorRole.Base).name() == colors["field_bg"]
+        assert palette.color(group, QPalette.ColorRole.Text).name() == colors["primary_text"]
+    assert palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Base).name() == colors["disabled_bg"]
+    assert palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text).name() == colors["disabled_text"]
+
+
+def test_history_uses_shared_semantic_theme_and_rethemes_in_place(addon_module):
+    mod = addon_module
+    mod._apply_config({"theme": "dark"})
+    dialog = mod.SessionHistoryDialog(mod.mw)
+    dark = mod._ui_palette("dark")
+
+    assert dialog._clear_btn.objectName() == "destructiveButton"
+    assert "QPushButton#destructiveButton" in dialog.styleSheet()
+    assert "QTableCornerButton::section" in dialog.styleSheet()
+    assert "QHeaderView {" in dialog.styleSheet()
+    assert dialog.cards_chart._accent.name() == dark["chart_cards"]
+    assert dialog.again_chart._accent.name() == dark["chart_again"]
+    assert dialog.retention_chart._accent.name() == dark["chart_retention"]
+    assert dialog.table._alternating_rows is True
+    assert dialog.table._vertical_header.isVisible() is False
+    assert dialog._minimum_width == 720
+    assert (dialog._width, dialog._height) == (800, 720)
+
+    mod._session_history_dialog = dialog
+    mod._apply_config({"theme": "light"})
+    light = mod._ui_palette("light")
+
+    assert dialog._palette["window_bg"] == light["window_bg"]
+    assert dialog.cards_chart._accent.name() == light["chart_cards"]
+    assert dialog.again_chart._accent.name() == light["chart_again"]
+    assert dialog.retention_chart._accent.name() == light["chart_retention"]
+
+
+def test_ui_sources_do_not_embed_unapproved_color_literals():
+    root = Path(__file__).resolve().parents[1]
+    sources = [
+        root / "addon" / "history.py",
+        root / "addon" / "reviewer_progress_bar.py",
+        root / "addon" / "ui" / "progress_bar.py",
+    ]
+    pattern = re.compile(r"#[0-9a-fA-F]{6}|rgba?\([^\n)]*\)")
+    allowed_examples = {"#ffffff", "#3399cc"}
+
+    for source in sources:
+        matches = set(pattern.findall(source.read_text(encoding="utf-8")))
+        if source.name == "reviewer_progress_bar.py":
+            matches -= allowed_examples
+        assert matches == set(), f"Move raw UI colors in {source.name} into theme/config tokens: {sorted(matches)}"
+
+
+def test_progress_bar_default_segments_match_semantic_palette(addon_module):
+    mod = addon_module
+    mod._apply_config({})
+
+    assert {name: color.name() for name, color in mod.settings.segment_colors.items()} == {
+        "new": "#378ba5",
+        "learning": "#aa7926",
+        "review": "#41965a",
+    }
+
+
+def test_progress_bar_custom_colors_remain_authoritative(addon_module):
+    mod = addon_module
+    mod._apply_config(
+        {
+            "theme": "light",
+            "appearance": {
+                "day": {
+                    "text": "#101010",
+                    "background": "#f0f0f0",
+                    "foreground": "#123456",
+                    "border_radius": 3,
+                    "opacity": 100,
+                }
+            },
+            "segment_colors": {"new": "#112233", "learning": "#445566", "review": "#778899"},
+        }
+    )
+
+    assert mod.settings.active_theme.text == "#101010"
+    assert mod.settings.active_theme.background == "#f0f0f0"
+    assert mod.settings.active_theme.foreground == "#123456"
+    assert {name: color.name() for name, color in mod.settings.segment_colors.items()} == {
+        "new": "#112233",
+        "learning": "#445566",
+        "review": "#778899",
+    }
 
 
 def test_queue_counts_for_node_caps_and_excludes_buried(addon_module):
@@ -265,6 +659,90 @@ def test_queue_counts_for_node_caps_and_excludes_buried(addon_module):
     node.new_count = 4
 
     assert mod._queue_counts_for_node(node) == (5, 3, 2, 1, 2, 6)
+
+
+def test_completed_counts_use_historical_answer_state_and_original_deck(addon_module):
+    mod = addon_module
+    db = SQLiteDB()
+    db.execute("create table cards (id integer primary key, did integer, odid integer, type integer, queue integer)")
+    db.execute("create table revlog (id integer, cid integer, type integer, lastIvl integer, ease integer, time integer)")
+    for row in (
+        (1, 10, 0, 2, 2),
+        (2, 10, 0, 2, 1),
+        (3, 10, 0, 2, 3),
+        (4, 99, 10, 3, 2),
+    ):
+        db.execute("insert into cards values (?, ?, ?, ?, ?)", row)
+    for row in (
+        (2001, 1, 0, 0, 3, 1000),       # first answer of a new card
+        (2002, 2, 0, -60, 3, 1000),     # learning step
+        (2003, 3, 2, 1, 1, 1000),       # relearning
+        (2004, 4, 1, 10, 3, 1000),      # review from a filtered deck
+    ):
+        db.execute("insert into revlog values (?, ?, ?, ?, ?, ?)", row)
+    mod.mw.col.db = db
+
+    assert mod._done_counts_by_deck_since(1000) == {10: (1, 2, 1)}
+
+
+def test_queue_counts_respect_limits_and_exclude_suspended_and_buried(addon_module):
+    mod = addon_module
+    db = SQLiteDB()
+    db.execute("create table cards (id integer primary key, did integer, odid integer, type integer, queue integer)")
+    rows = [
+        (1, 1, 0, 2, 2),
+        (2, 1, 0, 2, 2),
+        (3, 1, 0, 2, -1),
+        (4, 1, 0, 2, -2),
+        (5, 1, 0, 3, 1),
+        (6, 1, 0, 0, 0),
+        (7, 1, 0, 0, -3),
+    ]
+    for row in rows:
+        db.execute("insert into cards values (?, ?, ?, ?, ?)", row)
+    mod.mw.col.db = db
+    node = DeckNode(1)
+    node.review_count = 1
+    node.learn_count = 1
+    node.new_count = 2
+
+    assert mod._queue_counts_for_node(node) == (1, 1, 1, 1, 0, 1)
+
+
+def test_nested_deck_counts_are_aggregated_once_at_the_selected_root(addon_module):
+    mod = addon_module
+    db = SQLiteDB()
+    db.execute("create table cards (id integer primary key, did integer, odid integer, type integer, queue integer)")
+    for row in ((1, 1, 0, 2, 2), (2, 2, 0, 2, 2), (3, 2, 0, 2, 2)):
+        db.execute("insert into cards values (?, ?, ?, ?, ?)", row)
+    mod.mw.col.db = db
+    child = DeckNode(2)
+    child.review_count = 2
+    parent = DeckNode(1, [child])
+    parent.review_count = 3
+
+    mod.updateCountsForTree(parent, True, {2: (1, 0, 0)})
+
+    assert mod.rawRemainCount[1] == 3
+    assert mod.rawRemainCount[2] == 2
+    assert mod.rawDoneCount[1] == 1
+    assert mod.rawDoneCount[2] == 1
+
+
+def test_revlog_windows_are_half_open(addon_module):
+    mod = addon_module
+    db = SQLiteDB()
+    db.execute("create table revlog (id integer, cid integer, type integer, lastIvl integer, ease integer, time integer)")
+    for row in (
+        (1000, 1, 1, 10, 3, 1000),
+        (1999, 2, 1, 10, 3, 1000),
+        (2000, 3, 1, 10, 3, 1000),
+    ):
+        db.execute("insert into revlog values (?, ?, ?, ?, ?, ?)", row)
+    mod.mw.col.db = db
+
+    stats = mod._revlog_stats_between(1000, 2000, [])
+    assert stats[0] == 2
 
 
 def test_legacy_warning_config_is_ignored(addon_module):
@@ -313,6 +791,35 @@ def test_progress_modes_change_visible_label(addon_module):
     assert (" " + "T" + "R") not in stats_label
 
 
+def test_progress_label_falls_back_to_compact_and_minimal_text(addon_module):
+    mod = addon_module
+
+    class Metrics:
+        def horizontalAdvance(self, text):
+            return len(text) * 10
+
+    class Bar:
+        def __init__(self, width):
+            self._width = width
+
+        def width(self):
+            return self._width
+
+        def fontMetrics(self):
+            return Metrics()
+
+    full = "Full progress details that do not fit"
+    compact = "2/10 (20%) | 8 left"
+    minimal = "2/10 | 8 left"
+
+    mod.progress_ui.progressBar = Bar(230)
+    assert mod._fit_progress_bar_format(full, compact, minimal) == compact
+    mod.progress_ui.progressBar = Bar(120)
+    assert mod._fit_progress_bar_format(full, compact, minimal) == minimal
+    mod.progress_ui.progressBar = Bar(500)
+    assert mod._fit_progress_bar_format(full, compact, minimal) == full
+
+
 def test_history_export_writes_expected_rows(tmp_path: Path, addon_module):
     mod = addon_module
     mod.mw.pm.profile = {
@@ -347,6 +854,59 @@ def test_history_export_writes_expected_rows(tmp_path: Path, addon_module):
     assert rows[1] == [mod.history.format_history_day(1), "5", "1.23", "10.50", "80.00", "50.00"]
 
 
+def test_malformed_history_is_safely_normalized(addon_module):
+    mod = addon_module
+    profile = {
+        mod.HISTORY_PROGRESS_KEY: [
+            "invalid",
+            {"day": "bad"},
+            {
+                "day": "2",
+                "cards": "bad",
+                "avg_seconds": float("nan"),
+                "again": 120,
+                "retention": -5,
+                "super_mature_retention": float("inf"),
+            },
+        ]
+    }
+
+    assert mod.history.read_history_records(profile) == [
+        {
+            "day": 2,
+            "cards": 0,
+            "avg_seconds": 0.0,
+            "again": 100.0,
+            "retention": 0.0,
+            "super_mature_retention": 0.0,
+        }
+    ]
+
+
+def test_history_replaces_same_day_and_enforces_retention(addon_module):
+    mod = addon_module
+    mod._apply_config({"history_days": 2})
+    mod.mw.col.sched.day_cutoff = 4 * 86400
+    profile = {
+        mod.HISTORY_PROGRESS_KEY: [
+            {"day": 3, "cards": 1},
+            {"day": 2, "cards": 2},
+            {"day": 1, "cards": 3},
+        ]
+    }
+
+    mod.history.update_daily_history(
+        profile,
+        3,
+        [1],
+        lambda *_args: (9, 1, 1, 8, 0, 0, 18),
+    )
+
+    records = profile[mod.HISTORY_PROGRESS_KEY]
+    assert [entry["day"] for entry in records] == [3, 2]
+    assert records[0]["cards"] == 9
+
+
 def test_segmented_progress_bar_paints_remaining_segments():
     from addon.ui import progress_bar as progress_ui
 
@@ -361,6 +921,21 @@ def test_segmented_progress_bar_paints_remaining_segments():
 
     assert len(painter.filled) >= 3
     assert any(fill[1].name() == "#111" for fill in painter.filled)
+
+
+def test_segmented_progress_bar_rounding_fills_track_exactly():
+    from addon.ui import progress_bar as progress_ui
+
+    palette = QPalette()
+    bar = progress_ui.SegmentedProgressBar(
+        {"new": progress_ui.QColor("#111111"), "learning": progress_ui.QColor("#222222"), "review": progress_ui.QColor("#333333")}
+    )
+    bar.setSegmentData(1, 1, 1, 0.0)
+    painter = QPainter()
+    bar._draw_segments_horizontal(painter, QRect(0, 0, 10, 4), palette)
+
+    segment_rects = [rect for rect, _brush in painter.filled[1:]]
+    assert sum(rect.width() for rect in segment_rects) == 10
 
 
 def test_progress_bar_keyboard_activation_and_accessibility(addon_module):
@@ -393,16 +968,30 @@ def test_progress_bar_tooltip_includes_deck_breakdown_hint(addon_module):
     mod = addon_module
     setup_progress_update(mod)
 
-    assert progress_ui.progressBar.toolTip() == "Click for full Deck Breakdown."
-    assert "Cards completed:" not in progress_ui.progressBar.toolTip()
+    assert "Click for full Deck Breakdown." in progress_ui.progressBar.toolTip()
+    assert "Cards completed:" in progress_ui.progressBar.toolTip()
 
     event = QHelpEvent(pos=SimpleNamespace(x=lambda: 0))
     assert progress_ui.progress_tooltip_filter.eventFilter(progress_ui.progressBar, event) is True
-    assert QToolTip.last_text == "Click for full Deck Breakdown."
+    assert "Cards completed:" in QToolTip.last_text
+    assert "Click for full Deck Breakdown." in QToolTip.last_text
 
     mod.setScrollingPB()
-    assert progress_ui.progressBar.toolTip() == "Click for full Deck Breakdown."
-    assert "Anki is updating the collection" not in progress_ui.progressBar.toolTip()
+    assert "Click for full Deck Breakdown." in progress_ui.progressBar.toolTip()
+    assert "Anki is updating the collection" in progress_ui.progressBar.toolTip()
+
+
+def test_progress_bar_tooltips_can_be_disabled(addon_module):
+    from addon.ui import progress_bar as progress_ui
+    from tests.stubs import QHelpEvent
+
+    mod = addon_module
+    mod._apply_config({"tooltip_enabled": False})
+    mod.initPB()
+    progress_ui.update_progress_tooltips("Detailed metrics", "Completed", "Remaining", 0.5)
+
+    assert progress_ui.progressBar.toolTip() == ""
+    assert progress_ui.progress_tooltip_filter.eventFilter(progress_ui.progressBar, QHelpEvent()) is False
 
 
 def _prepare_state_change_counts(mod) -> None:
@@ -472,8 +1061,25 @@ def test_settings_dialog_is_lightweight(addon_module):
     dialog = mod.ProgressBarConfigDialog(mod.mw)
     dialog._apply_compact_mode(600)
 
-    assert dialog._minimum_width == 420
+    assert dialog._minimum_width == 680
+    assert dialog._minimum_height == 560
+    assert (dialog._width, dialog._height) == (680, 620)
     assert dialog._compact_layout_active is False
+    assert dialog._header.objectName() == "settingsHeader"
+    assert dialog._display_card.objectName() == "settingsCard"
+    assert dialog._appearance_card.objectName() == "settingsCard"
+    assert dialog._footer.objectName() == "settingsFooter"
+    assert dialog._save_btn.objectName() == "primaryButton"
+    assert dialog._donate_btn._width == 98
+    for control in (
+        dialog.display_location_combo,
+        dialog.mode_combo,
+        dialog.dock_area_combo,
+        dialog.show_smtr_cb,
+        dialog.theme_combo,
+        dialog.shortcut_field,
+    ):
+        assert control._width == 200
     assert dialog.display_location_combo.currentData() == "review_and_home"
     assert dialog.mode_combo.currentData() == "stats"
     assert dialog.dock_area_combo.currentData() == "top"
@@ -490,7 +1096,7 @@ def test_settings_dialog_donate_button_opens_buy_me_a_coffee(addon_module):
 
     assert dialog._donate_btn.toolTip() == "Donate to support the creator"
     assert dialog._donate_btn._accessible_name == "Buy Me a Coffee"
-    assert dialog._donate_btn._icon.path.endswith("assets/buy_me_a_coffee.png")
+    assert "assets/buy_me_a_coffee.png" in dialog._donate_btn.styleSheet()
 
     dialog._donate_btn.clicked()
 
@@ -503,6 +1109,7 @@ def test_package_builder_includes_donate_asset():
     packaged_paths = {path.relative_to(package_addon.ADDON_DIR).as_posix() for path in package_addon._iter_package_files()}
 
     assert "assets/buy_me_a_coffee.png" in packaged_paths
+    assert "ui/theme.py" in packaged_paths
 
 
 def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
@@ -514,6 +1121,16 @@ def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
         manifest = json.loads(archive.read("manifest.json"))
 
     assert manifest["package"] == "1511983907"
+    assert manifest["min_point_version"] == 49
+    assert manifest["max_point_version"] == 260500
+    assert manifest["human_version"] == "1.1.0"
+
+
+def test_minimum_advertised_anki_version_uses_supported_code_path(addon_module, monkeypatch):
+    mod = addon_module
+    monkeypatch.setattr(mod, "anki_version", "2.1.49")
+
+    assert mod._is_anki_20() is False
 
 
 def test_tools_menu_only_exposes_progress_bar_settings(addon_module):
@@ -689,7 +1306,7 @@ def test_deck_breakdown_hide_empty_keeps_non_empty_descendants(addon_module):
 
 
 def test_deck_breakdown_columns_auto_fit_then_become_interactive(addon_module):
-    from tests.stubs import QHeaderView
+    from tests.stubs import QHeaderView, Qt
 
     mod = addon_module
     dialog = mod.DeckBreakdownDialog(mod.mw)
@@ -711,17 +1328,22 @@ def test_deck_breakdown_columns_auto_fit_then_become_interactive(addon_module):
     assert dialog._minimum_width < 960
     assert dialog._width == expected_width
     assert dialog._tree._resized_columns == [0, 1, 2, 3]
-    assert 170 <= dialog._tree._column_widths[0] <= 320
-    assert 240 <= dialog._tree._column_widths[1] <= 310
-    assert 220 <= dialog._tree._column_widths[2] <= 290
-    assert 110 <= dialog._tree._column_widths[3] <= 135
-    assert dialog._tree._column_widths[3] >= 110
+    assert mod._BREAKDOWN_DIALOG_MIN_WIDTH <= dialog._width <= mod._BREAKDOWN_DIALOG_MAX_WIDTH
+    assert 250 <= dialog._tree._column_widths[0] <= 420
+    assert 190 <= dialog._tree._column_widths[1] <= 250
+    assert 190 <= dialog._tree._column_widths[2] <= 240
+    assert 100 <= dialog._tree._column_widths[3] <= 130
     assert dialog._tree.header()._section_resize == {
-        0: QHeaderView.ResizeMode.Interactive,
+        0: QHeaderView.ResizeMode.Stretch,
         1: QHeaderView.ResizeMode.Interactive,
         2: QHeaderView.ResizeMode.Interactive,
         3: QHeaderView.ResizeMode.Interactive,
     }
+    assert dialog._toolbar.objectName() == "breakdownToolbar"
+    assert dialog._tree._horizontal_scrollbar_policy == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert dialog._tree._vertical_scrollbar_policy == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert sum(dialog._tree._column_widths.values()) + mod._BREAKDOWN_DIALOG_FRAME_WIDTH == dialog._width
+    assert dialog._height == mod._BREAKDOWN_DIALOG_DEFAULT_HEIGHT
 
 
 def test_deck_breakdown_auto_fit_can_shrink_to_smaller_content(addon_module):
@@ -782,6 +1404,53 @@ def test_deck_breakdown_reopen_reused_dialog_shrinks_to_content(addon_module):
     assert dialog._width < 1200
 
 
+def test_deck_breakdown_reused_dialog_rethemes_after_settings_apply(addon_module):
+    mod = addon_module
+    mod._apply_config({"theme": "dark"})
+    mod._latest_breakdown_rows = [
+        {
+            "name": "Short",
+            "actionable": (1, 0, 0),
+            "buried": (0, 0, 0),
+            "eta": "N/A",
+            "children": [],
+        }
+    ]
+
+    mod._open_deck_breakdown_dialog()
+    dialog = mod._deck_breakdown_dialog
+
+    assert "#0b1220" in dialog.styleSheet()
+    assert dialog._summary_card._palette["summary_bg"] == "#0f172a"
+    assert dialog._count_delegate._palette["card_bg"] == "#111827"
+
+    settings_dialog = mod.ProgressBarConfigDialog(mod.mw)
+    settings_dialog.theme_combo.setCurrentIndex(settings_dialog.theme_combo.findData("light"))
+    settings_dialog._apply_without_closing()
+
+    assert mod.mw.addonManager.config["theme"] == "light"
+    assert mod._deck_breakdown_dialog is dialog
+    assert "#f7f9fc" in dialog.styleSheet()
+    assert "#0b1220" not in dialog.styleSheet()
+    assert "#ffffff" in dialog._tree.styleSheet()
+    assert dialog._summary_card._palette["summary_bg"] == "#ffffff"
+    assert dialog._count_delegate._palette["card_bg"] == "#ffffff"
+    assert dialog._tree._update_calls > 0
+
+
+def test_deck_breakdown_delegate_repaints_parent_view_without_delegate_update(addon_module):
+    mod = addon_module
+    dialog = mod.DeckBreakdownDialog(mod.mw)
+    delegate = dialog._count_delegate
+    delegate.update = None
+
+    before = getattr(dialog._tree, "_update_calls", 0)
+    delegate.apply_theme(mod._ui_palette("dark"))
+
+    assert dialog._tree._update_calls == before + 1
+    assert delegate._palette["chip_new_bg"] == mod._ui_palette("dark")["chip_new_bg"]
+
+
 def test_deck_breakdown_rgba_colors_are_valid_for_painting(addon_module):
     mod = addon_module
 
@@ -805,6 +1474,78 @@ def test_deck_breakdown_row_prominence_uses_primary_and_muted_text(addon_module)
 
     palette = mod._ui_palette("light")
     active, empty = dialog._tree._items
+    assert active._foregrounds[0].color.name() == palette["primary_text"]
+    assert empty._foregrounds[0].color.name() == palette["muted_row_text"]
+
+
+def test_deck_breakdown_parent_rows_are_stronger_and_children_are_quieter(addon_module):
+    mod = addon_module
+    mod._apply_config({"theme": "light"})
+    dialog = mod.DeckBreakdownDialog(mod.mw)
+    dialog.update_rows(
+        [
+            {
+                "name": "Parent",
+                "actionable": (1, 0, 0),
+                "buried": (0, 0, 0),
+                "eta": "09:00 AM",
+                "children": [
+                    {
+                        "name": "Child",
+                        "actionable": (1, 0, 0),
+                        "buried": (0, 0, 0),
+                        "eta": "09:15 AM",
+                        "children": [],
+                    }
+                ],
+            }
+        ]
+    )
+
+    parent = dialog._tree._items[0]
+    child = parent.children[0]
+    palette = mod._ui_palette("light")
+    assert parent._fonts[0].bold() is True
+    assert parent.data(0, mod._BREAKDOWN_CHILD_ROLE) is False
+    assert child.data(0, mod._BREAKDOWN_CHILD_ROLE) is True
+    assert child._foregrounds[0].color.name() == palette["secondary_text"]
+
+
+def test_deck_breakdown_summary_chips_use_distinct_semantic_tints(addon_module):
+    mod = addon_module
+    mod._apply_config({"theme": "light"})
+    dialog = mod.DeckBreakdownDialog(mod.mw)
+    dialog.update_rows(
+        [{"name": "Deck", "actionable": (1, 2, 3), "buried": (0, 0, 0), "eta": "09:00 AM", "children": []}]
+    )
+
+    palette = mod._ui_palette("light")
+    assert palette["chip_new_bg"] in dialog._summary_card._chip_labels["new"].styleSheet()
+    assert palette["chip_learning_bg"] in dialog._summary_card._chip_labels["learning"].styleSheet()
+    assert palette["chip_review_bg"] in dialog._summary_card._chip_labels["review"].styleSheet()
+
+
+def test_deck_breakdown_delegate_and_rows_retheme_in_place(addon_module):
+    mod = addon_module
+    mod._apply_config({"theme": "dark"})
+    dialog = mod.DeckBreakdownDialog(mod.mw)
+    dialog._hide_empty_cb.setChecked(False)
+    dialog.update_rows(
+        [
+            {"name": "Active", "actionable": (2, 0, 0), "buried": (0, 0, 0), "eta": "09:00 AM", "children": []},
+            {"name": "Empty", "actionable": (0, 0, 0), "buried": (0, 0, 0), "eta": "N/A", "children": []},
+        ]
+    )
+
+    assert dialog._count_delegate._palette["chip_new_bg"] == mod._ui_palette("dark")["chip_new_bg"]
+
+    mod._deck_breakdown_dialog = dialog
+    mod._apply_config({"theme": "light"})
+
+    palette = mod._ui_palette("light")
+    active, empty = dialog._tree._items
+    assert dialog._count_delegate._palette["chip_new_bg"] == palette["chip_new_bg"]
+    assert dialog._summary_card._chip_labels["new"].styleSheet().count(palette["chip_new_bg"]) == 1
     assert active._foregrounds[0].color.name() == palette["primary_text"]
     assert empty._foregrounds[0].color.name() == palette["muted_row_text"]
 
@@ -865,3 +1606,132 @@ def test_profile_close_persistence_records_counts(addon_module):
     mod._on_profile_will_close()
 
     assert mod.mw.pm.profile[mod.PERSISTED_PROGRESS_KEY]["data"]["1"]["raw_total"] == 1
+
+
+def test_same_day_progress_restoration_tolerates_and_repairs_malformed_data(addon_module):
+    mod = addon_module
+    mod._prepare_counts_for_new_profile()
+    mod.mw.col.sched.day_cutoff = 2 * 86400
+    mod.mw.pm.profile = {
+        mod.PERSISTED_PROGRESS_KEY: {
+            "day": "2",
+            "data": {
+                "1": {"done": "2.5", "total": "1", "raw_done": "2", "raw_total": "1"},
+                "bad-deck": {"done": 5},
+                "3": {"done": "not-a-number"},
+                "4": {"done": float("nan"), "total": 4},
+            },
+        }
+    }
+
+    mod._ensure_persisted_progress_loaded()
+
+    assert mod.doneCount == {1: 2.5}
+    assert mod.totalCount == {1: 2.5}
+    assert mod.rawDoneCount == {1: 2}
+    assert mod.rawTotalCount == {1: 2}
+
+
+def test_day_rollover_discards_previous_day_snapshot_and_counts(addon_module):
+    mod = addon_module
+    mod._prepare_counts_for_new_profile()
+    mod.mw.col.sched.day_cutoff = 2 * 86400
+    mod.mw.pm.profile = {
+        mod.PERSISTED_PROGRESS_KEY: {
+            "day": 2,
+            "data": {"1": {"done": 1, "total": 5, "raw_done": 1, "raw_total": 5}},
+        }
+    }
+    mod._ensure_persisted_progress_loaded()
+    assert mod.totalCount == {1: 5.0}
+
+    mod.mw.col.sched.day_cutoff = 3 * 86400
+    mod._ensure_persisted_progress_loaded()
+
+    assert mod.totalCount == {}
+    assert mod.PERSISTED_PROGRESS_KEY not in mod.mw.pm.profile
+
+
+def test_profile_close_restores_before_writing_so_snapshot_is_not_erased(addon_module):
+    mod = addon_module
+    mod._prepare_counts_for_new_profile()
+    mod.mw.col.sched.day_cutoff = 2 * 86400
+    mod.mw.col.db = SequenceDB(first_rows=[None])
+    mod.mw.pm.profile = {
+        mod.PERSISTED_PROGRESS_KEY: {
+            "day": 2,
+            "data": {"1": {"done": 1, "total": 5, "raw_done": 1, "raw_total": 5}},
+        }
+    }
+
+    mod._on_profile_will_close()
+
+    assert mod.mw.pm.profile[mod.PERSISTED_PROGRESS_KEY]["data"]["1"]["raw_total"] == 5
+    assert mod.totalCount == {}
+
+
+def test_profile_close_disposes_dialogs_and_progress_dock(addon_module):
+    mod = addon_module
+    mod._apply_config({})
+    mod.mw.col.sched.day_cutoff = 86400
+    mod.mw.col.db = SequenceDB(first_rows=[None])
+    mod.initPB()
+    deck_dialog = mod.DeckBreakdownDialog(mod.mw)
+    history_dialog = mod.SessionHistoryDialog(mod.mw)
+    mod._deck_breakdown_dialog = deck_dialog
+    mod._session_history_dialog = history_dialog
+
+    mod._on_profile_will_close()
+
+    assert mod.progressBar is None
+    assert mod.mw.docks == []
+    assert deck_dialog._closed is True
+    assert history_dialog._closed is True
+    assert mod._deck_breakdown_dialog is None
+    assert mod._session_history_dialog is None
+    assert mod.currDID is None
+
+
+def test_deleted_dialog_references_are_dropped_during_retheme(addon_module):
+    mod = addon_module
+
+    class DeletedDialog:
+        def apply_theme(self):
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+    mod._deck_breakdown_dialog = DeletedDialog()
+    mod._session_history_dialog = DeletedDialog()
+
+    mod._refresh_open_theme_surfaces()
+
+    assert mod._deck_breakdown_dialog is None
+    assert mod._session_history_dialog is None
+
+
+def test_empty_queues_render_as_complete_without_division_errors(addon_module):
+    mod = addon_module
+    mod._apply_config({})
+    mod.mw.col.sched.day_cutoff = 86400
+    mod.mw.col.sched._deck_tree = DeckNode(0, [DeckNode(1)])
+    mod.mw.col.db = SequenceDB(first_rows=[None, None, None, None])
+    mod.initPB()
+
+    mod.updateCountsForAllDecks(True)
+    mod.updatePB()
+
+    assert mod.progressBar._range == (0, 1)
+    assert mod.progressBar._value == 1
+
+
+def test_auto_theme_change_rethemes_open_surfaces(addon_module):
+    from aqt.theme import theme_manager
+
+    mod = addon_module
+    mod._apply_config({"theme": "auto"})
+    dialog = mod.DeckBreakdownDialog(mod.mw)
+    mod._deck_breakdown_dialog = dialog
+    theme_manager.night_mode = True
+
+    mod._on_theme_did_change()
+
+    assert dialog._palette["window_bg"] == mod._ui_palette("dark")["window_bg"]

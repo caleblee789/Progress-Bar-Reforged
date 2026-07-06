@@ -1,56 +1,91 @@
-# Release Readiness Audit (June 18, 2026)
+# Comprehensive Audit Report (July 6, 2026)
 
-## Scope
+## Scope and safety boundary
 
-Audited the add-on for AnkiWeb and GitHub release readiness across:
+Audited the complete working tree, including the existing uncommitted theme/UI work. The audit covered configuration and migration behavior, scheduler/count calculations, persistence and history, Qt hook/widget lifecycles, shortcuts, all add-on UI surfaces, accessibility, and packaging.
 
-- Reviewer progress bar behavior, keyboard access, and tooltip interaction.
-- Deck breakdown, session history, settings dialog, and persisted profile data.
-- Configuration defaults, legacy config tolerance, and source-install metadata.
-- Latest Anki compatibility metadata and API usage.
-- Test coverage, CI coverage, package generation, and release documentation.
+Real-runtime checks used Anki 26.05 with the disposable base `/tmp/progressbar-audit.nf2qM8`, profile `User 1`, no sync key, and add-on package `1511983907`. The normal Anki base/profile was not used or modified.
 
-## Findings and Fixes
+## Findings and fixes
 
-### R1 - Packaged add-on was stale
+### Medium: malformed stored progress/history could break startup or dialogs
 
-- **Observed:** `dist/progress_bar_time_left_testing.ankiaddon` still contained deleted `pacing.py` and used an old manifest.
-- **Fix:** Added `scripts/package_addon.py` and rebuilt `dist/progress_bar_time_left.ankiaddon` from `addon/` only.
-- **Status:** Fixed.
+- **Reproduction:** Store non-numeric, non-finite, negative, or structurally invalid values in `progress_bar_persistent_counts`, `progress_bar_history`, `appearance`, or `segment_colors`.
+- **Root cause:** Several restoration paths converted values without guarded finite/range checks; two object-validation branches could not report malformed payloads.
+- **Fix:** Added bounded, finite, backward-compatible normalization; invalid entries are skipped or repaired; repairs are idempotent and preserve valid records and explicit user colors.
+- **Verification:** Migration/config/history regression tests and isolated restart restoration passed.
 
-### R2 - Add-on metadata was not release-ready
+### Medium: day rollover and profile close could retain or erase the wrong snapshot
 
-- **Observed:** `addon/meta.json` had a legacy generated name and embedded old user config values.
-- **Fix:** Replaced it with clean release metadata: display name, homepage, `human_version`, empty source-install config, minimum Anki 2.1.49, and latest target Anki 26.05 (`260500`).
-- **Status:** Fixed.
+- **Reproduction:** Keep Anki open across the scheduler cutoff, or open/close a profile before progress restoration runs.
+- **Root cause:** Restoration was guarded by one process-wide boolean with no restored-day identity; profile close could persist empty in-memory maps before loading the saved snapshot.
+- **Fix:** Track the restored scheduler day, reset counts on rollover, restore before persisting, force a final close-time flush, and clear profile-specific state after teardown.
+- **Verification:** Same-day restart, rollover, unrestored-close, retention, and isolated Anki restart tests passed.
 
-### R3 - Keyboard deck-breakdown activation was documented but missing
+### Medium: completed-card categories changed after cards changed state
 
-- **Observed:** The progress bar handled mouse/context-menu activation, but not Enter/Space activation.
-- **Fix:** Added Enter, Return, and Space handling to the progress bar interaction filter; added focus policy and accessible metadata.
-- **Status:** Fixed and covered by tests.
+- **Reproduction:** Answer new, learning, relearning, or filtered-deck cards, then recalculate after the card graduates or returns to its original deck.
+- **Root cause:** Completed categories were derived from each card's current `cards.type`, not the historical `revlog.type`/`lastIvl` answer state.
+- **Fix:** Classify completed answers from revlog history and continue attributing filtered-deck answers to the original deck via `odid`.
+- **Verification:** Real SQLite tests cover new, learning, relearning, review, filtered-deck, nested-deck, limit, suspended, and buried cases.
 
-### R4 - CI did not match release targets
+### Medium: lifecycle cleanup left stale Qt/dock references
 
-- **Observed:** CI tested Python 3.10/3.11 only and did not exercise package generation.
-- **Fix:** Updated CI to test Python 3.10 and 3.13 and build the `.ankiaddon` package.
-- **Status:** Fixed.
+- **Reproduction:** Reapply settings repeatedly, close/reopen profiles, or retheme after a dialog's native Qt object has been deleted.
+- **Root cause:** The progress widget was deleted without explicitly deleting/tracking its dock, and cached dialogs were called without handling deleted wrapper objects.
+- **Fix:** Track and delete the owning dock, drop deleted dialog references, close dialogs and remove the bar on profile close/profile-manager transitions, and guard startup callbacks when no collection is available.
+- **Verification:** Dock reuse/teardown, deleted-dialog, profile-switch, and isolated close/reopen checks passed.
 
-### R5 - README compatibility and release packaging were outdated
+### Medium: progress details were computed but discarded; long labels clipped
 
-- **Observed:** README still claimed Anki 2.1.49-2.1.66 support and did not describe the GitHub release package path.
-- **Fix:** Updated compatibility, installation, verification, and package-build instructions.
-- **Status:** Fixed.
+- **Reproduction:** Hover the progress bar or use Stats mode at a normal-width Anki window.
+- **Root cause:** The tooltip layer replaced every supplied detail string with the deck-breakdown hint; the progress label had no measured-width fallback.
+- **Fix:** Preserve completed/remaining/default tooltip detail plus the breakdown hint, honor tooltip disablement, and use compact/minimal measured labels when the full Stats label does not fit.
+- **Verification:** Tooltip-region/disabled tests passed; real Anki captures show `0/1 (0%) | 1 left` without clipping at 667 logical pixels.
 
-## Verification
+### Medium: theme tokens missed requested WCAG component thresholds
 
-- `.venv/bin/python -m pytest -q` -> 14 passed.
-- `PYTHONPYCACHEPREFIX=.pytest_cache/pycache python3 -B -m py_compile ...` -> passed.
-- `.venv/bin/python scripts/package_addon.py` -> created `dist/progress_bar_time_left.ankiaddon`.
-- Package inspection confirmed no `pacing.py`, `meta.json`, tests, docs, `.pyc`, `__pycache__`, or `.DS_Store` entries.
+- **Reproduction:** Measure disabled text, structural/control borders, semantic chip borders, empty/active workload segments, and tooltip/destructive borders in Light and Dark modes.
+- **Root cause:** Several subtle borders and segment colors were below 3:1; disabled text was below 4.5:1.
+- **Fix:** Adjusted cool-neutral and semantic tokens while preserving explicit saved progress-bar colors. New default semantic segment colors clear 3:1 against both built-in tracks.
+- **Verification:** Automated contrast matrix enforces 4.5:1 text and 3:1 controls/borders/focus/graphics across both themes.
 
-## Release Notes
+### Low: UI surfaces clipped or rendered inconsistently
 
-- Latest upstream Anki release checked during this pass: 26.05.
-- The package manifest uses positive `max_point_version` metadata (`260500`) to record the latest tested target without disabling the add-on on newer Anki versions.
-- Final GUI smoke testing should install `dist/progress_bar_time_left.ankiaddon` in Anki 26.05 and verify reviewer, settings, deck breakdown, and history flows before uploading to AnkiWeb.
+- **Reproduction:** Open settings/history at their minimum sizes or force Dark mode for the donation raster.
+- **Root cause:** Settings opened narrower than the shortcut row, history opened narrower than its columns, and macOS tinted the branded raster when painted as a native icon.
+- **Fix:** Increased practical minimum widths, shortened recorder guidance, widened history, and rendered the raster as an untinted stylesheet image.
+- **Verification:** Final real-Anki Light/Dark/Auto captures show unclipped settings/history/progress content and the correct Dark-mode donation image.
+
+### Low: boundary and paint rounding defects
+
+- **Reproduction:** Place a revlog row exactly at a day boundary or divide a small segmented bar into rounded widths.
+- **Root cause:** History queries used inclusive end boundaries; independently rounded segment widths could leave gaps or overflow.
+- **Fix:** Use half-open `[start, end)` history windows and assign the final segment the remaining pixels.
+- **Verification:** SQLite boundary and exact-fill painting regressions passed.
+
+## Compatibility and interfaces
+
+- Add-on ID remains `1511983907`.
+- Human version is `1.1.0` for this release.
+- Existing config/profile-history keys, menu behavior, public exports, and explicit saved colors remain supported.
+- Minimum/maximum metadata remains Anki 2.1.49 through tested target 26.05 (`49` / `260500`). Older compatibility was checked through static/stub coverage only, as required.
+- Release packaging was prepared after the audit; publication history is tracked in Git and the release platforms.
+
+## Verification evidence
+
+- `./.venv/bin/python -m pytest -q` -> 77 passed.
+- `git diff --check` -> passed.
+- `py_compile` across all shipped Python modules and the package script -> passed.
+- Stub import smoke test -> passed.
+- Package build -> `dist/progress_bar_time_left.ankiaddon`.
+- Final archive SHA-256 -> `db3cb38272954171e26765e84a5d2c7a1457f387ff9f0dae89d7f3e160d42925`.
+- Archive manifest -> package `1511983907`, human version `1.1.0`, minimum `49`, maximum `260500`.
+- Archive payload -> 10 intended source files, byte-for-byte equal to `addon/`; no tests, docs, metadata state, caches, or development files.
+- Isolated Anki result -> `/tmp/progressbar-audit.nf2qM8/integration-result.json` reports Anki `26.05`, sync disabled, config restart verified, progress restart verified, theme hook available, and final package smoke verified.
+- Runtime exercised startup, deck-browser/overview/review callbacks, real scheduler/database counts, Apply persistence, restart restoration, shortcut toggling, top/bottom dock placement, dialogs, live retheming, history, profile close, and reopen.
+- Native Retina captures cover settings, deck breakdown, history, and progress surfaces in Light, Dark, and Auto. macOS retained DPR 2.0 despite Qt scale overrides; the 1x inspection set was therefore downsampled to each widget's exact logical dimensions and visually inspected separately.
+
+## Final status
+
+No reproducible high- or medium-severity defects remain. No cosmetic issue is intentionally deferred.
