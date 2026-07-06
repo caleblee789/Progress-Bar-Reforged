@@ -15,6 +15,14 @@ from .config import (
 from . import history
 from .history import HISTORY_PROGRESS_KEY, SessionHistoryDialog
 from .ui import progress_bar as progress_ui
+from .ui.theme import (
+    combo_qss,
+    deck_breakdown_qss,
+    resolve_theme_tokens,
+    settings_dialog_qss,
+    shortcut_qss,
+    ui_palette,
+)
 
 from anki.hooks import addHook, wrap
 from anki import version as anki_version
@@ -74,6 +82,7 @@ currDID: Optional[int] = None  # current deck id (None means at the deck browser
 _current_main_window_state: Optional[str] = "deckBrowser"
 _warning_active = False
 _deck_breakdown_dialog: Optional["DeckBreakdownDialog"] = None
+_session_history_dialog: Optional[SessionHistoryDialog] = None
 _latest_breakdown_rows: List[Dict[str, Any]] = []
 _latest_breakdown_summary: Optional[Dict[str, Any]] = None
 _last_cards_per_minute: Optional[float] = None
@@ -117,6 +126,9 @@ def _apply_settings(show_messages: bool = False) -> None:
         add_info()
     progress_ui.update_toggle_shortcut(toggleProgressBar)
     _reinitialize_progress_bar()
+    refresh = globals().get("_refresh_open_theme_surfaces")
+    if callable(refresh):
+        refresh()
 
 
 def _update_legacy_exports() -> None:
@@ -146,12 +158,16 @@ def _apply_config(new_config: Dict[str, Any]) -> None:
 
     addon_config.apply_config(mw, new_config)
     _reload_settings(show_messages=False)
+    refresh = globals().get("_refresh_open_theme_surfaces")
+    if callable(refresh):
+        refresh()
 
 
 _reload_settings(show_messages=True)
 
 PERSISTED_PROGRESS_KEY = "progress_bar_persistent_counts"
 _progress_restored = False
+_restored_day_stamp: Optional[int] = None
 _last_persisted_snapshot: Optional[Dict[str, Any]] = None
 _last_persisted_ts = 0.0
 _PERSIST_INTERVAL_SECONDS = 15.0
@@ -168,6 +184,7 @@ def _current_day_stamp() -> int:
 
 def _prepare_counts_for_new_profile() -> None:
     global _progress_restored
+    global _restored_day_stamp
     global _last_persisted_snapshot
     global _last_persisted_ts
     remainCount.clear()
@@ -183,15 +200,22 @@ def _prepare_counts_for_new_profile() -> None:
     buriedLrnCount.clear()
     buriedNewCount.clear()
     _progress_restored = False
+    _restored_day_stamp = None
     _last_persisted_snapshot = None
     _last_persisted_ts = 0.0
 
 
 def _ensure_persisted_progress_loaded() -> None:
     global _progress_restored
+    global _restored_day_stamp
 
-    if _progress_restored:
+    today = _current_day_stamp()
+
+    if _progress_restored and _restored_day_stamp == today:
         return
+
+    if _progress_restored and _restored_day_stamp != today:
+        _prepare_counts_for_new_profile()
 
     if mw.pm is None or mw.col is None:
         return
@@ -199,24 +223,32 @@ def _ensure_persisted_progress_loaded() -> None:
     profile = getattr(mw.pm, "profile", None)
     if not isinstance(profile, dict):
         _progress_restored = True
+        _restored_day_stamp = today
         return
 
     stored = profile.get(PERSISTED_PROGRESS_KEY)
     if not isinstance(stored, dict):
         _progress_restored = True
+        _restored_day_stamp = today
         return
 
-    today = _current_day_stamp()
-    stored_day = stored.get("day")
+    try:
+        stored_day = int(stored.get("day"))
+    except (TypeError, ValueError, OverflowError):
+        stored_day = None
     if stored_day != today:
         profile.pop(PERSISTED_PROGRESS_KEY, None)
         mw.pm.save()
         _progress_restored = True
+        _restored_day_stamp = today
         return
 
     data = stored.get("data")
     if not isinstance(data, dict):
+        profile.pop(PERSISTED_PROGRESS_KEY, None)
+        mw.pm.save()
         _progress_restored = True
+        _restored_day_stamp = today
         return
 
     for did_key, counts in data.items():
@@ -228,10 +260,21 @@ def _ensure_persisted_progress_loaded() -> None:
         if not isinstance(counts, dict):
             continue
 
-        done = float(counts.get("done", 0.0))
-        total = float(counts.get("total", done))
-        raw_done = int(counts.get("raw_done", 0))
-        raw_total = int(counts.get("raw_total", raw_done))
+        try:
+            done = float(counts.get("done", 0.0))
+            total = float(counts.get("total", done))
+            raw_done = int(counts.get("raw_done", 0))
+            raw_total = int(counts.get("raw_total", raw_done))
+        except (TypeError, ValueError, OverflowError):
+            continue
+
+        if not math.isfinite(done) or not math.isfinite(total):
+            continue
+
+        done = max(0.0, done)
+        total = max(0.0, total)
+        raw_done = max(0, raw_done)
+        raw_total = max(0, raw_total)
 
         if total < done:
             total = done
@@ -244,14 +287,17 @@ def _ensure_persisted_progress_loaded() -> None:
         rawTotalCount[did] = raw_total
 
     _progress_restored = True
+    _restored_day_stamp = today
 
 
-def _persist_progress_snapshot() -> None:
+def _persist_progress_snapshot(*, force: bool = False) -> None:
     global _last_persisted_snapshot
     global _last_persisted_ts
 
     if mw.pm is None or mw.col is None:
         return
+
+    _ensure_persisted_progress_loaded()
 
     profile = getattr(mw.pm, "profile", None)
     if not isinstance(profile, dict):
@@ -279,7 +325,9 @@ def _persist_progress_snapshot() -> None:
     persisted_changed = snapshot != _last_persisted_snapshot
     too_soon = (now - _last_persisted_ts) < _PERSIST_INTERVAL_SECONDS
 
-    if not persisted_changed and too_soon:
+    if not force and too_soon:
+        return
+    if not persisted_changed and not force:
         return
 
     if snapshot:
@@ -307,6 +355,9 @@ def add_info():
     # revlog types: 0=lrn, 1=rev, 2=relrn, 3=early review
     # positive revlog intervals are in days (rev), negative in seconds (lrn)
     # odue/odid store original due/did when cards moved to filtered deck
+    if mw.col is None or getattr(mw.col, "db", None) is None or getattr(mw.col, "sched", None) is None:
+        return
+
     x = (mw.col.sched.day_cutoff - 86400 * settings.no_days) * 1000
     y = (mw.col.sched.day_cutoff - 86400) * 1000
     """Calculate progress using weights and card counts from the sched."""
@@ -416,9 +467,9 @@ def _done_counts_by_deck_since(cutoff: int) -> Dict[int, Tuple[int, int, int]]:
         """
         select
             coalesce(nullif(c.odid, 0), c.did) as deck_id,
-            sum(case when c.type = 2 then 1 else 0 end) as rev_done,
-            sum(case when c.type in (1, 3) then 1 else 0 end) as lrn_done,
-            sum(case when c.type = 0 then 1 else 0 end) as new_done
+            sum(case when r.type in (1, 3) then 1 else 0 end) as rev_done,
+            sum(case when r.type in (0, 2) and not (r.type = 0 and r.lastIvl = 0) then 1 else 0 end) as lrn_done,
+            sum(case when r.type = 0 and r.lastIvl = 0 then 1 else 0 end) as new_done
         from revlog r
         join cards c on c.id = r.cid
         where r.id > ?
@@ -536,7 +587,7 @@ def _revlog_stats_since(cutoff: int, deck_ids: List[int]):
 
 
 def _revlog_stats_between(start: int, end: int, deck_ids: List[int]):
-    """Aggregate revlog metrics between two cutoffs (inclusive).
+    """Aggregate revlog metrics in the half-open interval [start, end).
 
     Mirrors the columns returned by _revlog_stats_since.
     """
@@ -554,14 +605,14 @@ def _revlog_stats_between(start: int, end: int, deck_ids: List[int]):
 
     if not deck_ids:
         query = base_query + """
-        where r.id between ? and ?
+        where r.id >= ? and r.id < ?
     """
         params: List[int] = [start, end]
     else:
         placeholders = ",".join(["?"] * len(deck_ids))
         query = base_query + f"""
         join cards c on c.id = r.cid
-        where r.id between ? and ?
+        where r.id >= ? and r.id < ?
           and (c.did in ({placeholders}) or (c.odid != 0 and c.odid in ({placeholders})))
     """
         params = [start, end] + deck_ids + deck_ids
@@ -632,8 +683,55 @@ def _update_breakdown_rows(target_nodes, cards_per_minute: Optional[float]) -> N
 
 
 def _refresh_breakdown_dialog() -> None:
+    global _deck_breakdown_dialog
     if _deck_breakdown_dialog is not None:
-        _deck_breakdown_dialog.update_rows(_latest_breakdown_rows, _latest_breakdown_summary)
+        try:
+            _deck_breakdown_dialog.update_rows(_latest_breakdown_rows, _latest_breakdown_summary)
+        except RuntimeError:
+            _deck_breakdown_dialog = None
+
+
+def _refresh_open_theme_surfaces(settings_dialog: Optional["ProgressBarConfigDialog"] = None) -> None:
+    global _deck_breakdown_dialog
+    global _session_history_dialog
+    if settings_dialog is not None:
+        try:
+            settings_dialog.apply_theme()
+        except RuntimeError:
+            pass
+    if _deck_breakdown_dialog is not None:
+        try:
+            _deck_breakdown_dialog.apply_theme()
+        except RuntimeError:
+            _deck_breakdown_dialog = None
+    if _session_history_dialog is not None:
+        try:
+            _session_history_dialog.apply_theme()
+        except RuntimeError:
+            _session_history_dialog = None
+
+
+def _fit_progress_bar_format(full_text: str, compact_text: str, minimal_text: str) -> str:
+    """Choose a label that fits the live progress bar without clipping."""
+
+    bar = progress_ui.progressBar
+    if bar is None:
+        return full_text
+    if getattr(settings, "compact_mode", False):
+        return compact_text
+    try:
+        available = max(0, int(bar.width()) - 16)
+        metrics = bar.fontMetrics()
+        measure = getattr(metrics, "horizontalAdvance", None)
+        if not callable(measure):
+            measure = getattr(metrics, "width", None)
+        if not callable(measure) or int(measure(full_text)) <= available:
+            return full_text
+        if int(measure(compact_text)) <= available:
+            return compact_text
+        return minimal_text
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return full_text
 
 
 def _open_deck_breakdown_dialog() -> None:
@@ -641,6 +739,11 @@ def _open_deck_breakdown_dialog() -> None:
 
     if _deck_breakdown_dialog is None:
         _deck_breakdown_dialog = DeckBreakdownDialog(mw)
+    else:
+        try:
+            _deck_breakdown_dialog.apply_theme()
+        except RuntimeError:
+            _deck_breakdown_dialog = DeckBreakdownDialog(mw)
 
     _deck_breakdown_dialog.request_auto_fit()
     _deck_breakdown_dialog.update_rows(_latest_breakdown_rows)
@@ -1225,6 +1328,15 @@ def updatePB():
         format_output = warning_summary_text
     if warning_active:
         format_output = (format_output + " ⚠").strip() if format_output else "⚠"
+    compact_output = f"{raw_done}/{raw_total} ({percent:.0f}%)  |  {var_diff:.0f} left"
+    if speed > 0:
+        compact_output += f"  |  ETA {eta_display}"
+    if warning_active:
+        compact_output += "  ⚠"
+    minimal_output = f"{raw_done}/{raw_total}  |  {var_diff:.0f} left"
+    if warning_active:
+        minimal_output += "  ⚠"
+    format_output = _fit_progress_bar_format(format_output, compact_output, minimal_output)
     progress_ui.progressBar.setFormat(format_output)
     global _warning_active
     if warning_active != _warning_active:
@@ -1399,7 +1511,8 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
         if not progress_ui.progressBar and settings.progress_bar_enabled:
             initPB()
     elif state == "profileManager":
-        # fixes the issue with multiple profiles
+        _remove_progress_bar()
+        currDID = None
         return
     else:  # "overview" or "review"
         # showInfo("mw.col.decks.current()['id'])= %d" % mw.col.decks.current()['id'])
@@ -1415,7 +1528,7 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
 
 def showQuestionCallBack() -> None:
     # showInfo("updateCountsForAllDecks(False), currDID = %d" % (currDID if currDID else 0))
-    if not settings.progress_bar_enabled:
+    if not settings.progress_bar_enabled or mw.col is None:
         return
     updateCountsForAllDecks(False)  # see comments at updateCountsForAllDecks()
     updatePB()
@@ -1430,11 +1543,43 @@ def _on_profile_did_open() -> None:
 
 
 def _on_profile_will_close() -> None:
-    _persist_progress_snapshot()
+    global currDID
+    global _current_main_window_state
+    global _deck_breakdown_dialog
+    global _session_history_dialog
+
+    try:
+        _persist_progress_snapshot(force=True)
+    except Exception as err:
+        print(f"Progress Bar could not persist profile state: {err}")
+
+    for dialog in (_deck_breakdown_dialog, _session_history_dialog):
+        if dialog is not None:
+            try:
+                dialog.close()
+            except (AttributeError, RuntimeError):
+                pass
+    _deck_breakdown_dialog = None
+    _session_history_dialog = None
+    _remove_progress_bar()
+    currDID = None
+    _current_main_window_state = "profileManager"
+    _prepare_counts_for_new_profile()
 
 
 gui_hooks.profile_did_open.append(_on_profile_did_open)
 gui_hooks.profile_will_close.append(_on_profile_will_close)
+
+
+def _on_theme_did_change(*_args) -> None:
+    if getattr(settings, "theme", "auto") != "auto":
+        return
+    _apply_settings(show_messages=False)
+
+
+_theme_did_change_hook = getattr(gui_hooks, "theme_did_change", None)
+if _theme_did_change_hook is not None:
+    _theme_did_change_hook.append(_on_theme_did_change)
 
 
 def _current_theme_choice() -> str:
@@ -1444,117 +1589,12 @@ def _current_theme_choice() -> str:
     return str(config.get("theme", "auto"))
 
 
-def _ui_palette(theme: Optional[str] = None) -> Dict[str, str]:
-    if addon_config.resolve_theme_mode(theme or _current_theme_choice()) == "dark":
-        return {
-            "window_bg": "#0b1220",
-            "primary_text": "#e5e7eb",
-            "secondary_text": "#cbd5e1",
-            "muted_text": "#9ca3af",
-            "helper_text": "#a5b2c5",
-            "section_header_text": "#e5e7eb",
-            "tab_border": "#1f2937",
-            "tab_selected_bg": "#111827",
-            "tab_selected_text": "#e5e7eb",
-            "tab_selected_border": "#334155",
-            "tab_selected_bottom": "#60a5fa",
-            "tab_unselected_text": "#94a3b8",
-            "tab_hover_bg": "#1f2937",
-            "card_bg": "#111827",
-            "card_border": "rgba(255, 255, 255, 0.08)",
-            "advanced_bg": "#0f172a",
-            "advanced_border": "rgba(255, 255, 255, 0.12)",
-            "field_bg": "#0f172a",
-            "field_border": "#334155",
-            "focus_border": "#60a5fa",
-            "focus_shadow": "0 0 0 2px rgba(96, 165, 250, 0.28)",
-            "badge_text": "#9ca3af",
-            "button_bg": "#111827",
-            "button_hover_bg": "#1f2937",
-            "button_border": "#334155",
-            "button_text": "#e5e7eb",
-            "disabled_text": "#64748b",
-            "checkbox_text": "#e5e7eb",
-            "summary_bg": "#0f172a",
-            "summary_border": "rgba(255, 255, 255, 0.12)",
-            "summary_title_text": "#f8fafc",
-            "summary_text": "#cbd5e1",
-            "chip_bg": "rgba(148, 163, 184, 0.16)",
-            "chip_border": "rgba(148, 163, 184, 0.24)",
-            "chip_text": "#e5e7eb",
-            "chip_muted_bg": "rgba(100, 116, 139, 0.12)",
-            "chip_muted_text": "#94a3b8",
-            "segment_track": "#1e293b",
-            "segment_empty": "#334155",
-            "segment_new": "#38bdf8",
-            "segment_learning": "#f59e0b",
-            "segment_review": "#22c55e",
-            "control_bg": "#111827",
-            "control_hover_bg": "#1f2937",
-            "control_border": "#334155",
-            "table_alt_bg": "rgba(255, 255, 255, 0.03)",
-            "table_selection_bg": "rgba(96, 165, 250, 0.20)",
-            "table_selection_text": "#f8fafc",
-            "table_hover_bg": "rgba(96, 165, 250, 0.10)",
-            "muted_row_text": "#64748b",
-            "eta_muted_text": "#94a3b8",
-            "row_divider": "rgba(255, 255, 255, 0.08)",
-        }
+def _ui_tokens(theme: Optional[str] = None):
+    return resolve_theme_tokens(theme or _current_theme_choice())
 
-    return {
-        "window_bg": "#f7f9fc",
-        "primary_text": "#1f2937",
-        "secondary_text": "#3f4a59",
-        "muted_text": "#667085",
-        "helper_text": "#5f6c7b",
-        "section_header_text": "#1f2937",
-        "tab_border": "#d9e2ec",
-        "tab_selected_bg": "#f5f7fb",
-        "tab_selected_text": "#1f2937",
-        "tab_selected_border": "#cbd5e1",
-        "tab_selected_bottom": "#6b8dde",
-        "tab_unselected_text": "#4b5563",
-        "tab_hover_bg": "#f8fafc",
-        "card_bg": "#ffffff",
-        "card_border": "#d9e2ec",
-        "advanced_bg": "#f7f9fb",
-        "advanced_border": "#cbd5e1",
-        "field_bg": "#ffffff",
-        "field_border": "#cbd5e1",
-        "focus_border": "#5b8def",
-        "focus_shadow": "0 0 0 2px rgba(91, 141, 239, 0.18)",
-        "badge_text": "#6b7280",
-        "button_bg": "#f5f7fb",
-        "button_hover_bg": "#eef2ff",
-        "button_border": "#cbd5e1",
-        "button_text": "#1f2937",
-        "disabled_text": "#98a2b3",
-        "checkbox_text": "#2d2f36",
-        "summary_bg": "#ffffff",
-        "summary_border": "#d9e2ec",
-        "summary_title_text": "#111827",
-        "summary_text": "#475467",
-        "chip_bg": "#eef4ff",
-        "chip_border": "#d6e4ff",
-        "chip_text": "#1f2937",
-        "chip_muted_bg": "#f1f3f5",
-        "chip_muted_text": "#667085",
-        "segment_track": "#e7edf3",
-        "segment_empty": "#d1d9e4",
-        "segment_new": "#0891b2",
-        "segment_learning": "#d97706",
-        "segment_review": "#16a34a",
-        "control_bg": "#ffffff",
-        "control_hover_bg": "#eef2ff",
-        "control_border": "#cbd5e1",
-        "table_alt_bg": "#f5f8fc",
-        "table_selection_bg": "#dbeafe",
-        "table_selection_text": "#111827",
-        "table_hover_bg": "#eff6ff",
-        "muted_row_text": "#7a8699",
-        "eta_muted_text": "#667085",
-        "row_divider": "#e4eaf2",
-    }
+
+def _ui_palette(theme: Optional[str] = None) -> Dict[str, str]:
+    return ui_palette(theme or _current_theme_choice())
 
 
 def _open_donation_page() -> None:
@@ -1578,10 +1618,12 @@ class SettingRow(QWidget):
         self._title_text = title
         self._description_text = description
         self._palette = palette
+        self._highlighted = False
+        self._tip_btn = None
 
         layout = QHBoxLayout()
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(16)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(12)
 
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
@@ -1609,6 +1651,7 @@ class SettingRow(QWidget):
 
         if tooltip_text:
             tip_btn = QToolButton()
+            self._tip_btn = tip_btn
             tip_btn.setText("ⓘ")
             tip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             tip_btn.setToolTip(tooltip_text)
@@ -1618,13 +1661,26 @@ class SettingRow(QWidget):
             )
             control_layout.addWidget(tip_btn)
 
-        control_layout.addStretch()
         layout.addLayout(control_layout, 0)
 
         self.setLayout(layout)
         self._base_style = f"border-bottom: 1px solid {self._palette['row_divider']};"
         self.setStyleSheet(self._base_style)
         self.control = control
+
+    def apply_theme(self, palette: Dict[str, str]) -> None:
+        self._palette = palette
+        self.title_label.setStyleSheet(
+            f"font-weight: 600; font-size: 13px; color: {palette['section_header_text']}; margin-bottom: 2px;"
+        )
+        self.description_label.setStyleSheet(f"color: {palette['helper_text']}; font-size: 12px; line-height: 1.4;")
+        if self._tip_btn is not None:
+            self._tip_btn.setStyleSheet(
+                f"QToolButton {{ border: none; font-weight: 700; color: {palette['muted_text']}; font-size: 14px; padding: 4px; }}"
+                f"QToolButton:hover {{ color: {palette['focus_border']}; }}"
+            )
+        self._base_style = f"border-bottom: 1px solid {self._palette['row_divider']};"
+        self.set_highlighted(self._highlighted)
 
     def matches(self, query: str) -> bool:
         if not query:
@@ -1633,6 +1689,7 @@ class SettingRow(QWidget):
         return query.lower() in haystack
 
     def set_highlighted(self, on: bool) -> None:
+        self._highlighted = bool(on)
         if not on:
             self.setStyleSheet(self._base_style)
             return
@@ -1770,6 +1827,28 @@ class ColorPickerField(QWidget):
         self.colorChanged.emit(self.value())
 
 
+class _ShortcutRecorderFilter(QObject):
+    """Keep QKeySequenceEdit from capturing keys after incidental focus."""
+
+    def __init__(self, owner: "ShortcutField") -> None:
+        super().__init__(owner)
+        self._owner = owner
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        event_type = event.type()
+        event_types = getattr(QEvent, "Type", QEvent)
+        if event_type == getattr(event_types, "MouseButtonPress", object()):
+            self._owner._arm_recording()
+            return False
+        if event_type == getattr(event_types, "FocusIn", object()) and not self._owner._recording_armed:
+            self._owner._disarm_recording(refocus_web=False)
+            return True
+        if event_type == getattr(event_types, "FocusOut", object()):
+            self._owner._recording_armed = False
+            return False
+        return False
+
+
 class ShortcutField(QWidget):
     """Cross-platform shortcut editor with conflict detection and reset."""
 
@@ -1780,6 +1859,9 @@ class ShortcutField(QWidget):
         self._palette = palette
         self._default = default_shortcut
         self._last_conflict: Optional[str] = None
+        self._programmatic_update = False
+        self._recording_armed = False
+        self.setObjectName("shortcutField")
 
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1790,32 +1872,25 @@ class ShortcutField(QWidget):
         field_row.setSpacing(6)
 
         self._editor = QKeySequenceEdit()
+        self._editor.setObjectName("shortcutRecorder")
         self._editor.setClearButtonEnabled(True)
+        if hasattr(self._editor, "setMaximumSequenceLength"):
+            try:
+                self._editor.setMaximumSequenceLength(1)
+            except Exception:
+                pass
+        click_focus = getattr(getattr(Qt, "FocusPolicy", Qt), "ClickFocus", None)
+        if click_focus is not None and hasattr(self._editor, "setFocusPolicy"):
+            self._editor.setFocusPolicy(click_focus)
+        self._recorder_filter = _ShortcutRecorderFilter(self)
+        if hasattr(self._editor, "installEventFilter"):
+            self._editor.installEventFilter(self._recorder_filter)
         self._editor.keySequenceChanged.connect(self._on_changed)
-        self._editor.setStyleSheet(
-            f"""
-            QKeySequenceEdit {{
-                padding: 6px 8px;
-                border: 1px solid {palette['field_border']};
-                border-radius: 5px;
-                background: {palette['field_bg']};
-                color: {palette['primary_text']};
-                min-height: 20px;
-            }}
-            QKeySequenceEdit:hover {{
-                border-color: {palette['focus_border']};
-            }}
-            QKeySequenceEdit:focus {{
-                border-color: {palette['focus_border']};
-                box-shadow: {palette['focus_shadow']};
-            }}
-            """
-        )
 
-        record_hint = QLabel("Click then press the keys to record.")
-        record_hint.setStyleSheet(f"color: {palette['muted_text']};")
+        self._record_hint = QLabel("Click, then press keys.")
 
         self._reset_btn = QToolButton()
+        self._reset_btn.setObjectName("shortcutResetButton")
         self._reset_btn.setText("Reset to default")
         self._reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._reset_btn.clicked.connect(self.reset_to_default)
@@ -1824,27 +1899,38 @@ class ShortcutField(QWidget):
         field_row.addWidget(self._reset_btn)
 
         layout.addLayout(field_row)
-        layout.addWidget(record_hint)
+        layout.addWidget(self._record_hint)
 
         self._warning_label = QLabel("")
-        self._warning_label.setStyleSheet("color: #dc2626; font-weight: 600;")
+        self._warning_label.setObjectName("shortcutConflictLabel")
         layout.addWidget(self._warning_label)
 
         self.setLayout(layout)
+        self.apply_theme(palette)
         self.reset_to_default()
+
+    def apply_theme(self, palette: Optional[Dict[str, str]] = None) -> None:
+        tokens = _ui_tokens()
+        self._palette = palette or tokens.as_palette()
+        self._editor.setStyleSheet(shortcut_qss(tokens))
+        self._apply_editor_palette()
+        self._reset_btn.setStyleSheet(settings_dialog_qss(tokens))
+        self._record_hint.setStyleSheet(f"color: {self._palette['muted_text']};")
+        self._warning_label.setStyleSheet(f"color: {self._palette['danger_text']}; font-weight: 600;")
+        self.update()
 
     def value(self) -> str:
         text = self._editor.keySequence().toString()
         return text or self._default
 
     def reset_to_default(self) -> None:
-        self._editor.setKeySequence(QKeySequence(self._default))
+        self._set_editor_sequence(self._default)
         self._update_warning(None)
         self.shortcutChanged.emit(self.value())
 
     def set_shortcut(self, shortcut: str) -> None:
         target = shortcut or self._default
-        self._editor.setKeySequence(QKeySequence(target))
+        self._set_editor_sequence(target)
         self._update_warning(self._detect_conflict(QKeySequence(target)))
         self.shortcutChanged.emit(self.value())
 
@@ -1852,20 +1938,113 @@ class ShortcutField(QWidget):
         conflict = self._detect_conflict(sequence)
         self._update_warning(conflict)
         self.shortcutChanged.emit(self.value())
+        if not self._programmatic_update and not sequence.isEmpty():
+            self._disarm_recording(refocus_web=False)
+
+    def _set_editor_sequence(self, shortcut: str) -> None:
+        self._programmatic_update = True
+        try:
+            self._editor.setKeySequence(QKeySequence(shortcut))
+        finally:
+            self._programmatic_update = False
+
+    def _arm_recording(self) -> None:
+        self._recording_armed = True
+        self._record_hint.setText("Press shortcut keys.")
+
+    def _disarm_recording(self, refocus_web: bool = False) -> None:
+        self._recording_armed = False
+        self._record_hint.setText("Click, then press keys.")
+        if hasattr(self._editor, "clearFocus"):
+            try:
+                self._editor.clearFocus()
+            except Exception:
+                pass
+        if refocus_web and hasattr(mw, "web") and hasattr(mw.web, "setFocus"):
+            try:
+                mw.web.setFocus()
+            except Exception:
+                pass
+
+    def _apply_editor_palette(self) -> None:
+        palette_cls = globals().get("QPalette")
+        color_cls = globals().get("QColor")
+        if palette_cls is None or color_cls is None or not hasattr(self._editor, "setPalette"):
+            return
+        try:
+            widget_palette = palette_cls()
+            roles = getattr(palette_cls, "ColorRole", palette_cls)
+            role_colors = {
+                "Base": self._palette["field_bg"],
+                "Window": self._palette["field_bg"],
+                "Button": self._palette["field_bg"],
+                "Text": self._palette["primary_text"],
+                "WindowText": self._palette["primary_text"],
+                "ButtonText": self._palette["primary_text"],
+                "Highlight": self._palette["table_selection_bg"],
+                "HighlightedText": self._palette["table_selection_text"],
+            }
+            groups = getattr(palette_cls, "ColorGroup", None)
+            group_names = ("Active", "Inactive", "Disabled") if groups is not None else ()
+            if group_names:
+                for group_name in group_names:
+                    group = getattr(groups, group_name, None)
+                    if group is None:
+                        continue
+                    for role_name, color in role_colors.items():
+                        role = getattr(roles, role_name, None)
+                        if role is None:
+                            continue
+                        resolved_color = color
+                        if group_name == "Disabled":
+                            if role_name in {"Base", "Window", "Button"}:
+                                resolved_color = self._palette["disabled_bg"]
+                            elif role_name in {"Text", "WindowText", "ButtonText", "HighlightedText"}:
+                                resolved_color = self._palette["disabled_text"]
+                        widget_palette.setColor(group, role, color_cls(resolved_color))
+            else:
+                for role_name, color in role_colors.items():
+                    role = getattr(roles, role_name, None)
+                    if role is not None:
+                        widget_palette.setColor(role, color_cls(color))
+            self._editor.setPalette(widget_palette)
+            if hasattr(self._editor, "setAutoFillBackground"):
+                self._editor.setAutoFillBackground(True)
+            if hasattr(self._editor, "findChildren"):
+                for child in self._editor.findChildren(QWidget):
+                    if hasattr(child, "setPalette"):
+                        child.setPalette(widget_palette)
+                    if hasattr(child, "setAutoFillBackground"):
+                        child.setAutoFillBackground(True)
+        except Exception:
+            pass
 
     def _detect_conflict(self, sequence: QKeySequence) -> Optional[str]:
         if sequence.isEmpty():
             return "Click to record a shortcut."
 
-        for action in mw.findChildren(QAction):
+        candidates = list(mw.findChildren(QAction))
+        shortcut_class = globals().get("QShortcut")
+        if shortcut_class is not None:
+            candidates.extend(mw.findChildren(shortcut_class))
+
+        for action in candidates:
+            if action is progress_ui.toggle_shortcut:
+                continue
             try:
-                other = action.shortcut()
+                shortcut_getter = getattr(action, "shortcut", None)
+                if not callable(shortcut_getter):
+                    shortcut_getter = getattr(action, "key", None)
+                other = shortcut_getter() if callable(shortcut_getter) else None
             except Exception:
                 continue
             if not other or other.isEmpty():
                 continue
             if other.matches(sequence) == QKeySequence.SequenceMatch.ExactMatch:
-                text = action.text() or "another action"
+                text_value = getattr(action, "text", None)
+                text = text_value() if callable(text_value) else text_value
+                object_name = getattr(action, "objectName", lambda: "")()
+                text = text or object_name or "another shortcut"
                 return f"Conflicts with {text}."
         return None
 
@@ -1899,6 +2078,7 @@ def _qt_user_role(offset: int = 0):
 _BREAKDOWN_COUNTS_ROLE = _qt_user_role(0)
 _BREAKDOWN_MUTED_ROLE = _qt_user_role(1)
 _BREAKDOWN_TOTAL_ROLE = _qt_user_role(2)
+_BREAKDOWN_CHILD_ROLE = _qt_user_role(3)
 _CSS_RGBA_RE = re.compile(
     r"^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*([0-9]*\.?[0-9]+)\s*\)$",
     re.IGNORECASE,
@@ -2095,7 +2275,7 @@ class _WorkloadSegmentBar(QWidget):
         self._display_counts: Tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._animation = None
         if hasattr(self, "setMinimumHeight"):
-            self.setMinimumHeight(18)
+            self.setMinimumHeight(14)
         if hasattr(self, "setMouseTracking"):
             self.setMouseTracking(True)
         self.setAccessibleName("Workload type breakdown")
@@ -2148,6 +2328,10 @@ class _WorkloadSegmentBar(QWidget):
             ("Review", self._counts[2], self._palette["segment_review"]),
         ]
 
+    def apply_theme(self, palette: Dict[str, str]) -> None:
+        self._palette = palette
+        self.update()
+
     def _segment_tooltip_at(self, x: float) -> str:
         total = sum(self._counts)
         if total <= 0:
@@ -2197,7 +2381,7 @@ class _WorkloadSegmentBar(QWidget):
             render_hint = getattr(getattr(QPainter, "RenderHint", QPainter), "Antialiasing", None)
             if render_hint is not None and hasattr(painter, "setRenderHint"):
                 painter.setRenderHint(render_hint)
-            rect = self.rect().adjusted(0, 4, 0, -4)
+            rect = self.rect().adjusted(0, 3, 0, -3)
             if rect.width() <= 0 or rect.height() <= 0:
                 return
 
@@ -2254,8 +2438,8 @@ class _DashboardSummaryCard(QFrame):
         if frame_shape is not None:
             self.setFrameShape(frame_shape)
         layout = QVBoxLayout()
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(5)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -2297,7 +2481,7 @@ class _DashboardSummaryCard(QFrame):
         chip_row.setSpacing(6)
         for key in ("new", "learning", "review"):
             label = QLabel("")
-            label.setStyleSheet(self._chip_style(active=False))
+            label.setStyleSheet(self._chip_style(key, active=False))
             self._chip_labels[key] = label
             chip_row.addWidget(label)
         chip_row.addStretch(1)
@@ -2305,14 +2489,25 @@ class _DashboardSummaryCard(QFrame):
 
         self.setLayout(layout)
 
-    def _chip_style(self, active: bool) -> str:
-        bg = self._palette["chip_bg"] if active else self._palette["chip_muted_bg"]
-        border = self._palette["chip_border"]
-        color = self._palette["chip_text"] if active else self._palette["chip_muted_text"]
+    def _chip_style(self, key: str, active: bool) -> str:
+        if active:
+            bg = self._palette[f"chip_{key}_bg"]
+            border = self._palette[f"chip_{key}_border"]
+            color = self._palette[f"chip_{key}_text"]
+        else:
+            bg = self._palette["chip_muted_bg"]
+            border = self._palette["chip_border"]
+            color = self._palette["chip_muted_text"]
         return (
             f"background: {bg}; border: 1px solid {border}; border-radius: 6px; "
             f"color: {color}; padding: 2px 7px; font-size: 11px; font-weight: 600;"
         )
+
+    def apply_theme(self, palette: Dict[str, str]) -> None:
+        self._palette = palette
+        self._segment_bar.apply_theme(palette)
+        self.update_summary(self._summary)
+        self.update()
 
     def update_summary(self, summary: Dict[str, Any]) -> None:
         self._summary = dict(summary)
@@ -2328,7 +2523,7 @@ class _DashboardSummaryCard(QFrame):
         for key, (label, value) in chip_values.items():
             chip = self._chip_labels[key]
             chip.setText(f"{label} {value}")
-            chip.setStyleSheet(self._chip_style(active=value > 0))
+            chip.setStyleSheet(self._chip_style(key, active=value > 0))
         self._segment_bar.set_counts((new, lrn, rev))
         self.setToolTip("")
 
@@ -2361,17 +2556,18 @@ except NameError:  # pragma: no cover - only used if Qt omits the delegate in te
             return QSize(170, 30)
 
 
-_COUNT_CELL_MIN_WIDTH = 210
+_COUNT_CELL_MIN_WIDTH = 190
 _COUNT_CELL_MIN_HEIGHT = 30
-_BREAKDOWN_DIALOG_MIN_WIDTH = 720
-_BREAKDOWN_DIALOG_FRAME_WIDTH = 72
+_BREAKDOWN_DIALOG_MIN_WIDTH = 850
+_BREAKDOWN_DIALOG_MAX_WIDTH = 950
+_BREAKDOWN_DIALOG_FRAME_WIDTH = 32
 _BREAKDOWN_DIALOG_SCREEN_MARGIN = 80
-_BREAKDOWN_DIALOG_DEFAULT_HEIGHT = 620
+_BREAKDOWN_DIALOG_DEFAULT_HEIGHT = 560
 _BREAKDOWN_COLUMN_WIDTH_BOUNDS = {
-    0: (170, 320),
-    1: (240, 310),
-    2: (220, 290),
-    3: (110, 135),
+    0: (250, 420),
+    1: (190, 250),
+    2: (190, 240),
+    3: (100, 130),
 }
 
 
@@ -2389,6 +2585,32 @@ class _CountBreakdownDelegate(_StyledItemDelegateBase):
     def __init__(self, palette: Dict[str, str], parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._palette = palette
+
+    def apply_theme(self, palette: Dict[str, str]) -> None:
+        self._palette = palette
+        parent = None
+        if hasattr(self, "parent"):
+            try:
+                parent = self.parent()
+            except Exception:
+                parent = None
+        if parent is None and hasattr(self, "parentWidget"):
+            try:
+                parent = self.parentWidget()
+            except Exception:
+                parent = None
+
+        viewport = parent
+        if parent is not None and hasattr(parent, "viewport"):
+            try:
+                viewport = parent.viewport()
+            except Exception:
+                viewport = parent
+        if viewport is not None and hasattr(viewport, "update"):
+            try:
+                viewport.update()
+            except Exception:
+                pass
 
     def sizeHint(self, option, index):  # type: ignore[override]
         try:
@@ -2427,6 +2649,7 @@ class _CountBreakdownDelegate(_StyledItemDelegateBase):
             new, lrn, rev = _normalize_counts(counts)
             total = new + lrn + rev
             muted = bool(index.data(_BREAKDOWN_MUTED_ROLE))
+            child = bool(index.data(_BREAKDOWN_CHILD_ROLE))
             rect = option.rect.adjusted(8, 4, -8, -4)
 
             painter.save()
@@ -2437,7 +2660,9 @@ class _CountBreakdownDelegate(_StyledItemDelegateBase):
                 total_font.setBold(True)
                 painter.setFont(total_font)
             total_metrics = painter.fontMetrics()
-            text_color = self._palette["muted_row_text"] if muted else self._palette["primary_text"]
+            text_color = self._palette["muted_row_text"] if muted else (
+                self._palette["secondary_text"] if child else self._palette["primary_text"]
+            )
             painter.setPen(_qcolor_from_css(text_color))
             total_text = str(total)
             flags = getattr(Qt.AlignmentFlag, "AlignVCenter", 0) | getattr(Qt.AlignmentFlag, "AlignLeft", 0)
@@ -2451,14 +2676,14 @@ class _CountBreakdownDelegate(_StyledItemDelegateBase):
             if font_cls is not None:
                 painter.setFont(base_font)
             chip_metrics = painter.fontMetrics()
-            chip_data = (("N", new), ("L", lrn), ("R", rev))
-            for label, value in chip_data:
+            chip_data = (("N", "new", new), ("L", "learning", lrn), ("R", "review", rev))
+            for label, semantic, value in chip_data:
                 chip_text = f"{label} {value}"
                 chip_width = (chip_metrics.horizontalAdvance(chip_text) if hasattr(chip_metrics, "horizontalAdvance") else chip_metrics.width(chip_text)) + 14
                 chip_rect = QRect(x_pos, chip_top, chip_width, chip_height)
                 active = value > 0 and not muted
-                bg = self._palette["chip_bg"] if active else self._palette["chip_muted_bg"]
-                text = self._palette["chip_text"] if active else self._palette["chip_muted_text"]
+                bg = self._palette[f"chip_{semantic}_bg"] if active else self._palette["chip_muted_bg"]
+                text = self._palette[f"chip_{semantic}_text"] if active else self._palette["chip_muted_text"]
                 if hasattr(painter, "setPen"):
                     no_pen = getattr(getattr(Qt, "PenStyle", Qt), "NoPen", None)
                     if no_pen is not None:
@@ -2487,17 +2712,23 @@ class DeckBreakdownDialog(QDialog):
         self.setWindowTitle("Deck Breakdown")
         self.setModal(False)
         self.setMinimumWidth(_BREAKDOWN_DIALOG_MIN_WIDTH)
+        self.resize(_BREAKDOWN_DIALOG_MIN_WIDTH, _BREAKDOWN_DIALOG_DEFAULT_HEIGHT)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._tree = None
         self._tree_widget_item_cls = None
         self._header_view_cls = None
         self._summary_card = None
         self._count_delegate = None
+        self._toolbar = None
+        self._hide_empty_cb = None
+        self._sort_combo = None
         self._raw_rows: List[Dict[str, Any]] = []
         self._summary: Dict[str, Any] = _build_breakdown_summary([])
         self._hide_empty = True
         self._sort_mode = "deck"
         self._auto_fit_pending = True
+        self._theme_tokens = _ui_tokens()
+        self._palette = self._theme_tokens.as_palette()
         self._build_ui()
 
     def request_auto_fit(self) -> None:
@@ -2520,7 +2751,7 @@ class DeckBreakdownDialog(QDialog):
             self._tree = None
             return
 
-        palette = _ui_palette()
+        palette = self._palette
         layout = QVBoxLayout()
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -2528,7 +2759,10 @@ class DeckBreakdownDialog(QDialog):
         self._summary_card = _DashboardSummaryCard(palette)
         layout.addWidget(self._summary_card)
 
+        self._toolbar = QFrame()
+        self._toolbar.setObjectName("breakdownToolbar")
         controls = QHBoxLayout()
+        controls.setContentsMargins(10, 6, 10, 6)
         controls.setSpacing(8)
 
         self._hide_empty_cb = QCheckBox("Hide empty")
@@ -2548,7 +2782,8 @@ class DeckBreakdownDialog(QDialog):
         controls.addStretch(1)
         controls.addWidget(sort_label)
         controls.addWidget(self._sort_combo)
-        layout.addLayout(controls)
+        self._toolbar.setLayout(controls)
+        layout.addWidget(self._toolbar)
 
         self._tree = QTreeWidget()
         self._tree.setRootIsDecorated(True)
@@ -2563,10 +2798,19 @@ class DeckBreakdownDialog(QDialog):
         if elide_mode is not None and hasattr(self._tree, "setTextElideMode"):
             self._tree.setTextElideMode(elide_mode)
 
+        scroll_policies = getattr(Qt, "ScrollBarPolicy", Qt)
+        as_needed = getattr(scroll_policies, "ScrollBarAsNeeded", None)
+        if as_needed is not None:
+            if hasattr(self._tree, "setHorizontalScrollBarPolicy"):
+                self._tree.setHorizontalScrollBarPolicy(as_needed)
+            if hasattr(self._tree, "setVerticalScrollBarPolicy"):
+                self._tree.setVerticalScrollBarPolicy(as_needed)
+
         self._tree.header().setStretchLastSection(False)
         if hasattr(self._tree.header(), "setMinimumSectionSize"):
             self._tree.header().setMinimumSectionSize(72)
-        for column in range(4):
+        self._set_header_resize_mode(0, "Stretch")
+        for column in range(1, 4):
             self._set_header_resize_mode(column, "Interactive")
 
         if hasattr(self._tree, "setItemDelegateForColumn"):
@@ -2577,82 +2821,25 @@ class DeckBreakdownDialog(QDialog):
         layout.addWidget(self._tree)
 
         self.setLayout(layout)
-        self.setStyleSheet(
-            f"""
-            QDialog {{
-                background: {palette["window_bg"]};
-                color: {palette["primary_text"]};
-            }}
-            QFrame#dashboardSummaryCard {{
-                background: {palette["summary_bg"]};
-                border: 1px solid {palette["summary_border"]};
-                border-radius: 8px;
-            }}
-            QLabel#dashboardTitle {{
-                color: {palette["summary_title_text"]};
-                font-size: 15px;
-                font-weight: 700;
-            }}
-            QLabel#dashboardMain {{
-                color: {palette["summary_text"]};
-                font-size: 12px;
-            }}
-            QToolButton {{
-                background: {palette["control_bg"]};
-                color: {palette["button_text"]};
-                border: 1px solid {palette["control_border"]};
-                border-radius: 6px;
-                padding: 3px 7px;
-                font-weight: 600;
-                min-height: 20px;
-            }}
-            QToolButton:hover {{
-                background: {palette["control_hover_bg"]};
-                border-color: {palette["focus_border"]};
-            }}
-            QCheckBox {{
-                color: {palette["checkbox_text"]};
-                spacing: 6px;
-            }}
-            QComboBox {{
-                background: {palette["control_bg"]};
-                color: {palette["primary_text"]};
-                border: 1px solid {palette["control_border"]};
-                border-radius: 6px;
-                padding: 3px 8px;
-                min-height: 20px;
-            }}
-            QComboBox:hover, QComboBox:focus {{
-                border-color: {palette["focus_border"]};
-            }}
-            QTreeWidget {{
-                background: {palette["card_bg"]};
-                alternate-background-color: {palette["table_alt_bg"]};
-                color: {palette["primary_text"]};
-                border: 1px solid {palette["card_border"]};
-                border-radius: 6px;
-            }}
-            QTreeWidget::item {{
-                border: none;
-                padding: 5px 6px;
-            }}
-            QTreeWidget::item:hover {{
-                background: {palette["table_hover_bg"]};
-            }}
-            QTreeWidget::item:selected {{
-                background: {palette["table_selection_bg"]};
-                color: {palette["table_selection_text"]};
-            }}
-            QHeaderView::section {{
-                background: {palette["tab_selected_bg"]};
-                color: {palette["tab_selected_text"]};
-                border: 1px solid {palette["tab_border"]};
-                padding: 5px 8px;
-                font-weight: 700;
-            }}
-            """
-        )
+        self.apply_theme()
         self._summary_card.update_summary(self._summary)
+
+    def apply_theme(self) -> None:
+        self._theme_tokens = _ui_tokens()
+        self._palette = self._theme_tokens.as_palette()
+        qss = deck_breakdown_qss(self._theme_tokens)
+        self.setStyleSheet(qss)
+        if self._tree is not None:
+            self._tree.setStyleSheet(qss)
+        if self._sort_combo is not None:
+            self._sort_combo.setStyleSheet(combo_qss(self._theme_tokens))
+        if self._summary_card is not None:
+            self._summary_card.apply_theme(self._palette)
+        if self._count_delegate is not None:
+            self._count_delegate.apply_theme(self._palette)
+        if self._tree is not None and self._raw_rows:
+            self._rebuild_tree()
+        self.update()
 
     def _format_counts(self, counts: Tuple[int, int, int]) -> str:
         return _format_counts_compact(counts)
@@ -2727,6 +2914,7 @@ class DeckBreakdownDialog(QDialog):
         if not column_widths:
             return
         target_width = sum(column_widths.values()) + _BREAKDOWN_DIALOG_FRAME_WIDTH
+        target_width = max(_BREAKDOWN_DIALOG_MIN_WIDTH, min(target_width, _BREAKDOWN_DIALOG_MAX_WIDTH))
         screen_width = self._available_screen_width()
         if screen_width:
             target_width = min(
@@ -2784,19 +2972,29 @@ class DeckBreakdownDialog(QDialog):
                     pass
             measured_widths[column] = max(self._column_width(column), content_hints.get(column, 0))
 
-        for column in range(4):
-            self._set_header_resize_mode(column, "Interactive")
-
-        viewport_width = self._tree_viewport_width()
         applied_widths: Dict[int, int] = {}
-        for column, (minimum, maximum) in _BREAKDOWN_COLUMN_WIDTH_BOUNDS.items():
-            effective_max = maximum
-            if column == 0:
-                effective_max = min(maximum, max(minimum, int(viewport_width * 0.45)))
-            measured = measured_widths.get(column, minimum)
-            width = max(minimum, min(measured, effective_max))
-            applied_widths[column] = width
+        for column in range(1, 4):
+            minimum, maximum = _BREAKDOWN_COLUMN_WIDTH_BOUNDS[column]
+            applied_widths[column] = max(minimum, min(measured_widths.get(column, minimum), maximum))
+
+        deck_minimum, deck_maximum = _BREAKDOWN_COLUMN_WIDTH_BOUNDS[0]
+        desired_deck_width = max(deck_minimum, min(measured_widths.get(0, deck_minimum), deck_maximum))
+        desired_dialog_width = desired_deck_width + sum(applied_widths.values()) + _BREAKDOWN_DIALOG_FRAME_WIDTH
+        target_dialog_width = max(
+            _BREAKDOWN_DIALOG_MIN_WIDTH,
+            min(desired_dialog_width, _BREAKDOWN_DIALOG_MAX_WIDTH),
+        )
+        applied_widths[0] = max(
+            deck_minimum,
+            target_dialog_width - _BREAKDOWN_DIALOG_FRAME_WIDTH - sum(applied_widths.values()),
+        )
+
+        for column, width in applied_widths.items():
             self._set_column_width(column, width)
+
+        self._set_header_resize_mode(0, "Stretch")
+        for column in range(1, 4):
+            self._set_header_resize_mode(column, "Interactive")
         if self._auto_fit_pending:
             self._resize_dialog_to_columns(applied_widths)
 
@@ -2806,15 +3004,17 @@ class DeckBreakdownDialog(QDialog):
         item.setData(column, _BREAKDOWN_MUTED_ROLE, muted)
         item.setData(column, _BREAKDOWN_TOTAL_ROLE, _count_total(counts))
 
-    def _apply_row_style(self, item: QTreeWidgetItem, muted: bool, eta_muted: bool) -> None:
-        palette = _ui_palette()
+    def _apply_row_style(self, item: QTreeWidgetItem, muted: bool, eta_muted: bool, is_child: bool) -> None:
+        palette = self._palette
         brush_cls = globals().get("QBrush")
         color_cls = globals().get("QColor")
         if brush_cls is None or color_cls is None or not hasattr(item, "setForeground"):
             return
 
         for column in range(4):
-            color = palette["muted_row_text"] if muted else palette["primary_text"]
+            color = palette["muted_row_text"] if muted else (
+                palette["secondary_text"] if is_child else palette["primary_text"]
+            )
             if column == 3 and eta_muted:
                 color = palette["eta_muted_text"]
             try:
@@ -2841,6 +3041,16 @@ class DeckBreakdownDialog(QDialog):
         item.setText(3, eta_text)
         item.setData(0, _BREAKDOWN_MUTED_ROLE, muted)
         item.setData(3, _BREAKDOWN_MUTED_ROLE, eta_muted)
+        is_child = parent_item is not None
+        for column in range(4):
+            item.setData(column, _BREAKDOWN_CHILD_ROLE, is_child)
+        if not is_child and hasattr(item, "font") and hasattr(item, "setFont"):
+            try:
+                parent_font = item.font(0)
+                parent_font.setBold(True)
+                item.setFont(0, parent_font)
+            except Exception:
+                pass
         if hasattr(item, "setToolTip"):
             item.setToolTip(0, name)
             item.setToolTip(1, _format_counts_accessible("Due today", actionable))
@@ -2849,7 +3059,7 @@ class DeckBreakdownDialog(QDialog):
         item.setTextAlignment(1, int(Qt.AlignmentFlag.AlignVCenter))
         item.setTextAlignment(2, int(Qt.AlignmentFlag.AlignVCenter))
         item.setTextAlignment(3, int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight))
-        self._apply_row_style(item, muted, eta_muted)
+        self._apply_row_style(item, muted, eta_muted, is_child)
 
         for child in row.get("children", []):
             self._add_row(child, item)
@@ -2895,62 +3105,27 @@ class ProgressBarConfigDialog(QDialog):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.setWindowTitle("Progress Bar Settings")
-        self.setMinimumWidth(420)
+        self.setMinimumSize(680, 560)
+        self.resize(680, 620)
         self._config_snapshot = deepcopy(config)
         self._building_ui = True
         self._dirty = False
         self._compact_layout_active = False
+        self._setting_rows: List[SettingRow] = []
         self._build_ui()
         self._populate_from_config(self._config_snapshot)
         self._building_ui = False
         self._update_dirty_state(False)
 
     def _build_ui(self) -> None:
-        palette = _ui_palette()
-        field_style = f"""
-            QComboBox {{
-                padding: 6px 8px;
-                border: 1px solid {palette['field_border']};
-                border-radius: 5px;
-                background: {palette['field_bg']};
-                color: {palette['primary_text']};
-                min-height: 20px;
-            }}
-            QComboBox:hover, QComboBox:focus {{
-                border-color: {palette['focus_border']};
-            }}
-        """
-        self.setStyleSheet(
-            f"""
-            QDialog {{
-                background: {palette['window_bg']};
-                color: {palette['primary_text']};
-            }}
-            QCheckBox {{
-                color: {palette['checkbox_text']};
-                spacing: 6px;
-            }}
-            QPushButton, QToolButton {{
-                padding: 6px 10px;
-                border: 1px solid {palette['button_border']};
-                border-radius: 5px;
-                background: {palette['button_bg']};
-                color: {palette['button_text']};
-                min-height: 20px;
-            }}
-            QPushButton:hover, QToolButton:hover {{
-                background: {palette['button_hover_bg']};
-                border-color: {palette['focus_border']};
-            }}
-            QPushButton:disabled, QToolButton:disabled {{
-                color: {palette['disabled_text']};
-            }}
-            """
-        )
+        tokens = _ui_tokens()
+        palette = tokens.as_palette()
+        field_style = combo_qss(tokens)
+        self.setStyleSheet(settings_dialog_qss(tokens))
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(8)
 
         self.progress_bar_enabled_cb = QCheckBox("Show progress bar")
         self.show_smtr_cb = QCheckBox("Show SMTR")
@@ -2980,33 +3155,65 @@ class ProgressBarConfigDialog(QDialog):
         default_shortcut = "Meta+G" if sys.platform == "darwin" else "Ctrl+G"
         self.shortcut_field = ShortcutField(default_shortcut, palette)
 
-        layout.addWidget(self.progress_bar_enabled_cb)
-        layout.addWidget(SettingRow("Show On", "Choose whether the progress bar appears on the deck browser and during reviews, or only during reviews.", self.display_location_combo, palette))
-        layout.addWidget(SettingRow("Mode", "Simple shows counts, Time Left adds ETA, Stats shows the full metric label.", self.mode_combo, palette))
-        layout.addWidget(SettingRow("SMTR", "Show super-mature retention in the Stats progress label.", self.show_smtr_cb, palette))
-        layout.addWidget(SettingRow("Position", "Place the progress bar above or below the reviewer.", self.dock_area_combo, palette))
-        layout.addWidget(SettingRow("Theme", "Auto follows Anki; Light and Dark force the built-in themes.", self.theme_combo, palette))
-        layout.addWidget(SettingRow("Shortcut", "Record the key sequence used to show or hide the progress bar.", self.shortcut_field, palette))
+        for control in (
+            self.display_location_combo,
+            self.mode_combo,
+            self.dock_area_combo,
+            self.show_smtr_cb,
+            self.theme_combo,
+            self.shortcut_field,
+        ):
+            control.setFixedWidth(200)
+
+        self._header = QFrame()
+        self._header.setObjectName("settingsHeader")
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(12, 8, 12, 8)
+        header_layout.addWidget(self.progress_bar_enabled_cb)
+        header_layout.addStretch(1)
+        self._header.setLayout(header_layout)
+        layout.addWidget(self._header)
+
+        self._setting_rows = [
+            SettingRow("Show On", "Choose whether the progress bar appears on the deck browser and during reviews, or only during reviews.", self.display_location_combo, palette),
+            SettingRow("Mode", "Simple shows counts, Time Left adds ETA, Stats shows the full metric label.", self.mode_combo, palette),
+            SettingRow("Position", "Place the progress bar above or below the reviewer.", self.dock_area_combo, palette),
+            SettingRow("SMTR", "Show super-mature retention in the Stats progress label.", self.show_smtr_cb, palette),
+            SettingRow("Theme", "Auto follows Anki; Light and Dark force the built-in themes.", self.theme_combo, palette),
+            SettingRow("Shortcut", "Record the key sequence used to show or hide the progress bar.", self.shortcut_field, palette),
+        ]
+
+        self._display_card = self._build_settings_card("Display", self._setting_rows[:4])
+        self._appearance_card = self._build_settings_card("Appearance & Shortcut", self._setting_rows[4:])
+        layout.addWidget(self._display_card)
+        layout.addWidget(self._appearance_card)
 
         self._dirty_badge = QLabel("")
+        self._dirty_badge.setObjectName("dirtyBadge")
         self._dirty_badge.setStyleSheet(f"color: {palette['muted_text']}; font-weight: 600;")
-        layout.addWidget(self._dirty_badge)
 
+        self._footer = QFrame()
+        self._footer.setObjectName("settingsFooter")
         button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 8, 0, 0)
+        button_row.setSpacing(8)
         self._donate_btn = self._build_donate_button()
         button_row.addWidget(self._donate_btn)
+        button_row.addWidget(self._dirty_badge)
         button_row.addStretch()
         self._apply_btn = QPushButton("Apply")
         self._apply_btn.clicked.connect(self._apply_without_closing)
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.clicked.connect(self.reject)
         self._save_btn = QPushButton("Save")
+        self._save_btn.setObjectName("primaryButton")
         self._save_btn.setDefault(True)
         self._save_btn.clicked.connect(self._save_and_close)
         button_row.addWidget(self._apply_btn)
         button_row.addWidget(self._cancel_btn)
         button_row.addWidget(self._save_btn)
-        layout.addLayout(button_row)
+        self._footer.setLayout(button_row)
+        layout.addWidget(self._footer)
         self.setLayout(layout)
 
         for control in (
@@ -3020,6 +3227,56 @@ class ProgressBarConfigDialog(QDialog):
         ):
             self._watch_control(control)
 
+        self.apply_theme()
+
+    def _build_settings_card(self, title: str, rows: List[SettingRow]) -> QFrame:
+        card = QFrame()
+        card.setObjectName("settingsCard")
+        card_layout = QVBoxLayout()
+        card_layout.setContentsMargins(0, 8, 0, 0)
+        card_layout.setSpacing(0)
+        section_title = QLabel(title)
+        section_title.setObjectName("settingsSectionTitle")
+        card_layout.addWidget(section_title)
+        for row in rows:
+            card_layout.addWidget(row)
+        card.setLayout(card_layout)
+        return card
+
+    def apply_theme(self) -> None:
+        tokens = _ui_tokens()
+        palette = tokens.as_palette()
+        self.setStyleSheet(settings_dialog_qss(tokens))
+        for combo in (
+            self.display_location_combo,
+            self.mode_combo,
+            self.dock_area_combo,
+            self.theme_combo,
+        ):
+            combo.setStyleSheet(combo_qss(tokens))
+        self.shortcut_field.apply_theme(palette)
+        for row in self._setting_rows:
+            row.apply_theme(palette)
+        self._dirty_badge.setStyleSheet(f"color: {palette['muted_text']}; font-weight: 600;")
+        self._donate_btn.setStyleSheet(self._donate_button_style())
+        self.update()
+
+    def _donate_button_style(self) -> str:
+        image_path = DONATE_IMAGE_PATH.as_posix()
+        return f"""
+            QToolButton#buyMeACoffeeButton {{
+                border: none;
+                border-image: url(\"{image_path}\") 0 0 0 0 stretch stretch;
+                background: transparent;
+                padding: 0px;
+            }}
+            QToolButton#buyMeACoffeeButton:hover {{
+                border: none;
+                border-image: url(\"{image_path}\") 0 0 0 0 stretch stretch;
+                background: transparent;
+            }}
+        """
+
     def _build_donate_button(self) -> QToolButton:
         button = QToolButton()
         button.setObjectName("buyMeACoffeeButton")
@@ -3028,24 +3285,11 @@ class ProgressBarConfigDialog(QDialog):
         button.setAccessibleName("Buy Me a Coffee")
         button.setAccessibleDescription(DONATE_TOOLTIP)
         button.clicked.connect(_open_donation_page)
-        button.setFixedSize(126, 36)
-        button.setStyleSheet(
-            """
-            QToolButton#buyMeACoffeeButton {
-                border: none;
-                background: transparent;
-                padding: 0px;
-            }
-            QToolButton#buyMeACoffeeButton:hover {
-                border: none;
-                background: transparent;
-            }
-            """
-        )
+        button.setFixedSize(98, 28)
+        button.setStyleSheet(self._donate_button_style())
 
         if DONATE_IMAGE_PATH.exists():
-            button.setIcon(QIcon(str(DONATE_IMAGE_PATH)))
-            button.setIconSize(QSize(126, 36))
+            button.setIcon(QIcon())
         else:
             button.setText("Buy me a coffee")
 
@@ -3122,6 +3366,7 @@ class ProgressBarConfigDialog(QDialog):
         updated_config = self._gather_config()
         addon_config.apply_config(mw, updated_config)
         _apply_settings(show_messages=False)
+        _refresh_open_theme_surfaces(self)
         self._config_snapshot = deepcopy(updated_config)
         self._update_dirty_state(False)
         if show_toast:
@@ -3145,8 +3390,13 @@ def _open_config_dialog() -> None:
 
 
 def _open_session_history_dialog() -> None:
+    global _session_history_dialog
     dialog = SessionHistoryDialog(mw)
-    dialog.exec()
+    _session_history_dialog = dialog
+    try:
+        dialog.exec()
+    finally:
+        _session_history_dialog = None
 
 
 def _reload_configuration_action() -> None:

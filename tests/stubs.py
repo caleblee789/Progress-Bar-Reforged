@@ -59,23 +59,40 @@ class QColor:
 
 
 class QPalette:
+    class ColorGroup:
+        Active = 0
+        Inactive = 1
+        Disabled = 2
+
     class ColorRole:
         Base = 0
         Highlight = 1
         Button = 2
         WindowText = 3
         Window = 4
+        Text = 5
+        ButtonText = 6
+        HighlightedText = 7
 
     def __init__(self, other: Optional["QPalette"] = None) -> None:
-        self.colors: Dict[int, QColor] = {}
+        self.colors: Dict[Any, QColor] = {}
         if isinstance(other, QPalette):
             self.colors = dict(other.colors)
 
-    def setColor(self, role: int, color: QColor) -> None:
-        self.colors[role] = color
+    def setColor(self, *args: Any) -> None:
+        if len(args) == 2:
+            role, color = args
+            self.colors[role] = color
+            return
+        group, role, color = args
+        self.colors[(group, role)] = color
 
-    def color(self, role: int) -> QColor:
-        return self.colors.get(role, QColor("#000000"))
+    def color(self, *args: Any) -> QColor:
+        if len(args) == 1:
+            role = args[0]
+            return self.colors.get(role, self.colors.get((self.ColorGroup.Active, role), QColor("#000000")))
+        group, role = args
+        return self.colors.get((group, role), self.colors.get(role, QColor("#000000")))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, QPalette):
@@ -132,6 +149,7 @@ class Qt:
 
     class ScrollBarPolicy:
         ScrollBarAlwaysOff = 1
+        ScrollBarAsNeeded = 2
 
     class ArrowType:
         RightArrow = 1
@@ -148,6 +166,7 @@ class Qt:
 
     class FocusPolicy:
         StrongFocus = 1
+        ClickFocus = 2
 
     class MouseButton:
         LeftButton = 1
@@ -175,6 +194,17 @@ class QSize:
         self.height = height
 
 
+class QFont:
+    def __init__(self, other: Optional["QFont"] = None) -> None:
+        self._bold = bool(getattr(other, "_bold", False))
+
+    def setBold(self, bold: bool) -> None:
+        self._bold = bool(bold)
+
+    def bold(self) -> bool:
+        return self._bold
+
+
 class QUrl:
     def __init__(self, url: str) -> None:
         self.url = url
@@ -185,7 +215,7 @@ class QUrl:
 
 class QIcon:
     def __init__(self, path: str = "") -> None:
-        self.path = path
+        self.path = getattr(path, "path", path)
 
 
 class QPixmap:
@@ -244,6 +274,28 @@ class QWidget:
     def isEnabled(self) -> bool:
         return getattr(self, "_enabled", True)
 
+    def installEventFilter(self, flt: Any) -> None:
+        self._event_filters = getattr(self, "_event_filters", [])
+        self._event_filters.append(flt)
+
+    def setFocus(self) -> None:
+        self._has_focus = True
+
+    def clearFocus(self) -> None:
+        self._has_focus = False
+
+    def hasFocus(self) -> bool:
+        return getattr(self, "_has_focus", False)
+
+    def setPalette(self, palette: QPalette) -> None:
+        self._palette = palette
+
+    def palette(self) -> Optional[QPalette]:
+        return getattr(self, "_palette", None)
+
+    def setAutoFillBackground(self, enabled: bool) -> None:
+        self._auto_fill_background = enabled
+
     def setToolTip(self, text: str) -> None:
         self._tooltip = text
 
@@ -260,13 +312,17 @@ class QWidget:
         return [c for c in self._children if isinstance(c, klass)]
 
     def update(self) -> None:
-        pass
+        self._update_calls = getattr(self, "_update_calls", 0) + 1
 
     def show(self) -> None:
         self._visible = True
 
     def hide(self) -> None:
         self._visible = False
+
+    def close(self) -> None:
+        self._visible = False
+        self._closed = True
 
     def raise_(self) -> None:
         self._raised = True
@@ -334,7 +390,14 @@ class QAction(QWidget):
     def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
         super().__init__()
         self.text = text
+        self._shortcut = QKeySequence("")
         self.triggered = HookList()
+
+    def shortcut(self) -> "QKeySequence":
+        return self._shortcut
+
+    def setShortcut(self, sequence: "QKeySequence") -> None:
+        self._shortcut = sequence
 
 
 class QDockWidget(QWidget):
@@ -454,9 +517,15 @@ class QKeySequenceEdit(QWidget):
         super().__init__()
         self._sequence = QKeySequence("")
         self.keySequenceChanged = HookList()
+        self._native_editor_child = QWidget()
+        self._native_editor_child.setObjectName("qt_keysequenceedit_lineedit")
+        self.addChild(self._native_editor_child)
 
     def setClearButtonEnabled(self, enabled: bool) -> None:
         self._clear_enabled = enabled
+
+    def setMaximumSequenceLength(self, length: int) -> None:
+        self._maximum_sequence_length = length
 
     def setKeySequence(self, sequence: QKeySequence) -> None:
         self._sequence = sequence
@@ -479,6 +548,9 @@ class QShortcut(QWidget):
 
     def setKey(self, sequence: QKeySequence) -> None:
         self.sequence = sequence
+
+    def key(self) -> QKeySequence:
+        return self.sequence
 
 
 class QDialog(QWidget):
@@ -597,6 +669,7 @@ class QTableWidget(QWidget):
         self._rows = 0
         self._headers: List[str] = []
         self.items: Dict[Tuple[int, int], "QTableWidgetItem"] = {}
+        self._vertical_header = QWidget()
 
     def setColumnCount(self, count: int) -> None:
         self._columns = count
@@ -607,6 +680,9 @@ class QTableWidget(QWidget):
     def horizontalHeader(self) -> "QTableWidget":
         return self
 
+    def verticalHeader(self) -> QWidget:
+        return self._vertical_header
+
     def setStretchLastSection(self, value: bool) -> None:
         self._stretch_last = value
 
@@ -615,6 +691,9 @@ class QTableWidget(QWidget):
 
     def setEditTriggers(self, triggers: Any) -> None:
         self._edit_triggers = triggers
+
+    def setAlternatingRowColors(self, value: bool) -> None:
+        self._alternating_rows = value
 
     def setRowCount(self, count: int) -> None:
         self._rows = count
@@ -766,6 +845,12 @@ class QTreeWidget(QWidget):
     def setTextElideMode(self, mode: Any) -> None:
         self._text_elide_mode = mode
 
+    def setHorizontalScrollBarPolicy(self, policy: Any) -> None:
+        self._horizontal_scrollbar_policy = policy
+
+    def setVerticalScrollBarPolicy(self, policy: Any) -> None:
+        self._vertical_scrollbar_policy = policy
+
     def setHeaderLabels(self, labels: Sequence[str]) -> None:
         self._headers = list(labels)
 
@@ -818,6 +903,7 @@ class QTreeWidgetItem:
         self._texts: Dict[int, str] = {}
         self._data: Dict[Tuple[int, int], Any] = {}
         self._alignments: Dict[int, Any] = {}
+        self._fonts: Dict[int, QFont] = {}
         self.children: List["QTreeWidgetItem"] = []
         if isinstance(parent, QTreeWidget):
             parent._items.append(self)
@@ -838,6 +924,12 @@ class QTreeWidgetItem:
 
     def setTextAlignment(self, column: int, alignment: Any) -> None:
         self._alignments[column] = alignment
+
+    def font(self, column: int) -> QFont:
+        return QFont(self._fonts.get(column))
+
+    def setFont(self, column: int, font: QFont) -> None:
+        self._fonts[column] = QFont(font)
 
     def setToolTip(self, column: int, text: str) -> None:
         self._tooltips = getattr(self, "_tooltips", {})
@@ -1084,6 +1176,9 @@ class QEvent:
         MouseButtonRelease = 1
         ContextMenu = 2
         KeyPress = 3
+        MouseButtonPress = 4
+        FocusIn = 5
+        FocusOut = 6
 
     def __init__(self, type_value: int = 0, *, button: Optional[int] = None, key: Optional[int] = None) -> None:
         self._type = type_value
@@ -1270,6 +1365,7 @@ def install_stubs(config: Optional[Dict[str, Any]] = None) -> MainWindowStub:
             "QIcon": QIcon,
             "QPixmap": QPixmap,
             "QSize": QSize,
+            "QFont": QFont,
             "QUrl": QUrl,
             "QColor": QColor,
             "QBrush": QBrush,

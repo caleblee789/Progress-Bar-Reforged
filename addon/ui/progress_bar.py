@@ -28,6 +28,7 @@ from .. import config
 nmStyleApplied = 0
 nmUnavailable = 0
 progressBar: Optional[QProgressBar] = None
+progress_dock: Optional[QDockWidget] = None
 toggle_shortcut: Optional[QShortcut] = None
 progress_tooltip_filter: Optional[QObject] = None
 interaction_filter: Optional[QObject] = None
@@ -69,10 +70,22 @@ def _update_progress_tooltips(
     global _progress_fraction
     global _default_tooltip_text
 
-    _default_tooltip_text = PROGRESS_BAR_TOOLTIP_HINT
+    tooltips_enabled = config.settings is None or config.settings.tooltip_enabled
+    if not tooltips_enabled:
+        _default_tooltip_text = ""
+        _progress_segment_tooltips = {"completed": "", "remaining": ""}
+        if progressBar is not None:
+            progressBar.setToolTip("")
+        return
+
+    def with_hint(text: Optional[str]) -> str:
+        content = (text or "").strip()
+        return f"{content}\n\n{PROGRESS_BAR_TOOLTIP_HINT}" if content else PROGRESS_BAR_TOOLTIP_HINT
+
+    _default_tooltip_text = with_hint(default_text)
     _progress_segment_tooltips = {
-        "completed": PROGRESS_BAR_TOOLTIP_HINT,
-        "remaining": PROGRESS_BAR_TOOLTIP_HINT,
+        "completed": with_hint(completed_text or default_text),
+        "remaining": with_hint(remaining_text or default_text),
     }
     if fraction is not None:
         _progress_fraction = max(0.0, min(1.0, fraction))
@@ -83,7 +96,7 @@ def _update_progress_tooltips(
 
 def _on_progress_bar_tooltip(event: QHelpEvent) -> bool:
     """Show context-aware tooltips based on the hovered portion of the bar."""
-    if progressBar is None:
+    if progressBar is None or not _default_tooltip_text:
         return False
 
     try:
@@ -189,16 +202,21 @@ class SegmentedProgressBar(QProgressBar):
         running_x = rect.left()
         if not self.invertedAppearance():
             running_x += filled_width
-        for name, count in segment_order:
-            if count <= 0:
-                continue
+        positive_segments = [(name, count) for name, count in segment_order if count > 0]
+        painted_width = 0
+        for index, (name, count) in enumerate(positive_segments):
             proportion = count / total_remaining
-            segment_width = int(round(remaining_width * proportion))
+            segment_width = (
+                remaining_width - painted_width
+                if index == len(positive_segments) - 1
+                else min(remaining_width - painted_width, int(round(remaining_width * proportion)))
+            )
             if segment_width <= 0:
                 continue
 
             seg_rect = QRect(running_x, rect.top(), segment_width, rect.height())
             running_x += segment_width
+            painted_width += segment_width
 
             painter.fillRect(seg_rect, self._segment_colors.get(name, palette.color(palette.ColorRole.Highlight)))
 
@@ -229,16 +247,21 @@ class SegmentedProgressBar(QProgressBar):
         ]
 
         running_y = remaining_start
-        for name, count in segment_order:
-            if count <= 0:
-                continue
+        positive_segments = [(name, count) for name, count in segment_order if count > 0]
+        painted_height = 0
+        for index, (name, count) in enumerate(positive_segments):
             proportion = count / total_remaining
-            segment_height = int(round(remaining_height * proportion))
+            segment_height = (
+                remaining_height - painted_height
+                if index == len(positive_segments) - 1
+                else min(remaining_height - painted_height, int(round(remaining_height * proportion)))
+            )
             if segment_height <= 0:
                 continue
 
             seg_rect = QRect(rect.left(), running_y, rect.width(), segment_height)
             running_y += segment_height
+            painted_height += segment_height
 
             painter.fillRect(seg_rect, self._segment_colors.get(name, palette.color(palette.ColorRole.Highlight)))
 
@@ -296,6 +319,7 @@ def init_progress_bar() -> None:
     global progressBar
     global progress_tooltip_filter
     global interaction_filter
+    global progress_dock
     if config.settings is None:
         return
     if config.settings.stacked_segments:
@@ -321,6 +345,7 @@ def init_progress_bar() -> None:
     progressBar.installEventFilter(interaction_filter)
 
     dock = _dock(progressBar)
+    progress_dock = dock
     if hasattr(mw, "docks") and dock not in getattr(mw, "docks", []):
         try:
             mw.docks.append(dock)
@@ -367,14 +392,19 @@ def _dock(pb: QProgressBar) -> QDockWidget:
 def remove_progress_bar() -> None:
     """Tear down any existing progress bar dock."""
     global progressBar
-    if progressBar is None:
+    global progress_dock
+    if progressBar is None and progress_dock is None:
         return
 
-    dock = progressBar.parentWidget()
+    dock = progress_dock or (progressBar.parentWidget() if progressBar is not None else None)
     if isinstance(dock, QDockWidget):
         mw.removeDockWidget(dock)
-    progressBar.deleteLater()
+        if hasattr(dock, "deleteLater"):
+            dock.deleteLater()
+    if progressBar is not None:
+        progressBar.deleteLater()
     progressBar = None
+    progress_dock = None
 
 
 def reinitialize_progress_bar() -> None:

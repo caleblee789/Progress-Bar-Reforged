@@ -5,7 +5,16 @@ Progress_Bar_Reforged adds a dockable progress bar to Anki's reviewer. It shows 
 
 The add-on builds on Glutanimate's original Progress Bar and Carlos Duarte's More Decks Stats and Time Left, then adds ETA estimates, deck breakdowns, session history data, keyboard control, and a compact settings dialog.
 
-Current release: **v1.0.2**. Install from AnkiWeb with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the GitHub release artifacts.
+Current release: **v1.1.0**. Install from AnkiWeb with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the GitHub release artifacts.
+
+What's new in v1.1.0
+--------------------
+
+* **Refined Light, Dark, and Auto themes** - consistent colors across settings, deck breakdown, history, tooltips, controls, and the reviewer bar, with stronger contrast for text, borders, focus states, and progress segments.
+* **More reliable progress restoration** - same-day progress survives restarts and profile reloads without carrying stale counts across Anki's scheduler-day rollover.
+* **More accurate completed-card categories** - completed New, Learning, Relearning, Review, and filtered-deck work is classified from review history instead of a card's later state.
+* **Better compact layouts** - progress labels adapt to available width, detailed tooltips are preserved, and settings/history dialogs avoid clipping at practical window sizes.
+* **Safer stored data handling** - malformed configuration, progress snapshots, and history values are repaired or ignored without discarding valid settings or explicit custom colors.
 
 Features
 --------
@@ -17,7 +26,7 @@ Features
 * **Display and appearance controls** - show the bar during reviews only or on both the deck browser and review screens, choose top or bottom docking, and use Auto, Light, or Dark theme.
 * **Session history data** - preserve daily pace metrics for compatibility with existing profiles.
 * **Keyboard and persistence** - toggle the bar with a configurable shortcut and preserve same-day progress across Anki restarts/profile reloads.
-* **Release polish** - simplified settings, cleaner light UI, preserved dark colors, and release-ready package metadata.
+* **Accessible theme system** - coordinated Light, Dark, and Auto palettes with visible focus states and contrast-tested text, controls, borders, and progress graphics.
 
 Compatibility
 -------------
@@ -78,7 +87,7 @@ Troubleshooting
 
 * If the bar disappears, confirm `progress_bar_enabled` is true and restart Anki.
 * If labels are crowded, use Simple or Time Left mode.
-* If text is hard to read, switch Theme between Auto, Light, and Dark.
+* If text is hard to read, switch Theme between Auto, Light, and Dark. Explicit custom progress-bar colors remain unchanged when switching themes.
 
 Development
 -----------

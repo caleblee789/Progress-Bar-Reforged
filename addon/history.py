@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -21,6 +22,8 @@ from aqt.qt import (
     QWidget,
     Qt,
 )
+
+from .ui.theme import history_dialog_qss, resolve_theme_tokens, ui_palette
 
 try:
     from aqt.qt import QPainter, QPen, QSizePolicy  # type: ignore
@@ -78,6 +81,14 @@ from . import config
 HISTORY_PROGRESS_KEY = "progress_bar_history"
 
 
+def _safe_number(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if math.isfinite(number) else default
+
+
 def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
     raw_history = profile.get(HISTORY_PROGRESS_KEY, [])
     if not isinstance(raw_history, list):
@@ -92,14 +103,22 @@ def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
             day_int = int(day)
         except (TypeError, ValueError):
             continue
+        cards = max(0, int(_safe_number(entry.get("cards", 0))))
+        avg_seconds = max(0.0, _safe_number(entry.get("avg_seconds", 0.0)))
+        again = min(100.0, max(0.0, _safe_number(entry.get("again", 0.0))))
+        retention = min(100.0, max(0.0, _safe_number(entry.get("retention", 0.0))))
+        super_mature_retention = min(
+            100.0,
+            max(0.0, _safe_number(entry.get("super_mature_retention", 0.0))),
+        )
         normalized.append(
             {
                 "day": day_int,
-                "cards": int(entry.get("cards", 0) or 0),
-                "avg_seconds": float(entry.get("avg_seconds", 0.0) or 0.0),
-                "again": float(entry.get("again", 0.0) or 0.0),
-                "retention": float(entry.get("retention", 0.0) or 0.0),
-                "super_mature_retention": float(entry.get("super_mature_retention", 0.0) or 0.0),
+                "cards": cards,
+                "avg_seconds": avg_seconds,
+                "again": again,
+                "retention": retention,
+                "super_mature_retention": super_mature_retention,
             }
         )
     return normalized
@@ -183,26 +202,28 @@ class SessionHistoryDialog(QDialog):
     def __init__(self, parent) -> None:
         super().__init__(parent)
         self.setWindowTitle("Progress Bar Session History")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(720)
+        self.resize(800, 720)
         self._history_data: List[Dict[str, Any]] = []
-        self._palette = self._resolve_palette()
+        self._theme_tokens = resolve_theme_tokens()
+        self._palette = self._theme_tokens.as_palette()
 
         layout = QVBoxLayout()
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        description = QLabel(
+        self._description = QLabel(
             "Review pace trends at a glance. Data is captured once per day and limited by your history_days setting."
         )
-        description.setWordWrap(True)
-        description.setStyleSheet(f"color: {self._palette['secondary_text']};")
-        layout.addWidget(description)
+        self._description.setObjectName("historyDescription")
+        self._description.setWordWrap(True)
+        layout.addWidget(self._description)
 
         controls = QHBoxLayout()
         controls.addStretch()
-        range_label = QLabel("Show:")
-        range_label.setStyleSheet(f"color: {self._palette['muted_text']};")
-        controls.addWidget(range_label)
+        self._range_label = QLabel("Show:")
+        self._range_label.setObjectName("historyRangeLabel")
+        controls.addWidget(self._range_label)
         self.range_selector = QComboBox()
         self.range_selector.addItem("Last 7 days", 7)
         self.range_selector.addItem("Last 30 days", 30)
@@ -222,17 +243,17 @@ class SessionHistoryDialog(QDialog):
         self.cards_chart = TrendChartWidget(
             "Cards per day",
             palette=self._palette,
-            accent=self._palette.get("tab_selected_bottom", "#5b8def"),
+            accent=self._theme_tokens.chart_cards,
         )
         self.again_chart = TrendChartWidget(
             "Again rate (%)",
             palette=self._palette,
-            accent=self._palette.get("focus_border", "#ef4444"),
+            accent=self._theme_tokens.chart_again,
         )
         self.retention_chart = TrendChartWidget(
             "True retention (%)",
             palette=self._palette,
-            accent=self._palette.get("tab_unselected_text", "#16a34a"),
+            accent=self._theme_tokens.chart_retention,
         )
 
         charts_layout.addWidget(self.cards_chart)
@@ -246,61 +267,40 @@ class SessionHistoryDialog(QDialog):
             ["Day", "Cards", "Avg s/card", "Again %", "True Retention %", "Super-mature %"]
         )
         self.table.horizontalHeader().setStretchLastSection(True)
+        if hasattr(self.table, "verticalHeader"):
+            self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        if hasattr(self.table, "setAlternatingRowColors"):
+            self.table.setAlternatingRowColors(True)
         layout.addWidget(self.table)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
-        export_btn = QPushButton("Export CSV")
-        export_btn.clicked.connect(self._export_csv)
-        btn_row.addWidget(export_btn)
+        self._export_btn = QPushButton("Export CSV")
+        self._export_btn.clicked.connect(self._export_csv)
+        btn_row.addWidget(self._export_btn)
 
-        clear_btn = QPushButton("Clear History")
-        clear_btn.clicked.connect(self._clear_history)
-        btn_row.addWidget(clear_btn)
+        self._clear_btn = QPushButton("Clear History")
+        self._clear_btn.setObjectName("destructiveButton")
+        self._clear_btn.clicked.connect(self._clear_history)
+        btn_row.addWidget(self._clear_btn)
 
         layout.addLayout(btn_row)
         self.setLayout(layout)
 
-        self.setStyleSheet(
-            f"""
-            QDialog {{
-                background: {self._palette['window_bg']};
-                color: {self._palette['primary_text']};
-            }}
-            QTableWidget {{
-                background: {self._palette['card_bg']};
-                color: {self._palette['primary_text']};
-                border: 1px solid {self._palette['card_border']};
-            }}
-            QHeaderView::section {{
-                background: {self._palette['tab_selected_bg']};
-                color: {self._palette['tab_selected_text']};
-                border: 1px solid {self._palette['tab_border']};
-            }}
-            QPushButton {{
-                padding: 6px 12px;
-                background: {self._palette['tab_selected_bg']};
-                color: {self._palette['primary_text']};
-                border: 1px solid {self._palette['tab_border']};
-                border-radius: 4px;
-            }}
-            QPushButton:hover {{
-                background: {self._palette['tab_hover_bg']};
-            }}
-            QComboBox {{
-                padding: 4px 8px;
-                background: {self._palette['card_bg']};
-                border: 1px solid {self._palette['field_border']};
-                color: {self._palette['primary_text']};
-                border-radius: 4px;
-            }}
-            """
-        )
-
+        self.apply_theme()
         self._reload()
+
+    def apply_theme(self) -> None:
+        self._theme_tokens = resolve_theme_tokens()
+        self._palette = self._theme_tokens.as_palette()
+        self.setStyleSheet(history_dialog_qss(self._theme_tokens))
+        self.cards_chart.apply_theme(self._palette, self._theme_tokens.chart_cards)
+        self.again_chart.apply_theme(self._palette, self._theme_tokens.chart_again)
+        self.retention_chart.apply_theme(self._palette, self._theme_tokens.chart_retention)
+        self.update()
 
     def _reload(self) -> None:
         self._history_data = self._load_history()
@@ -420,27 +420,7 @@ class SessionHistoryDialog(QDialog):
         self._reload()
 
     def _resolve_palette(self) -> Dict[str, str]:
-        try:
-            from .reviewer_progress_bar import _ui_palette
-
-            return _ui_palette()
-        except Exception:
-            return {
-                "window_bg": "#ffffff",
-                "primary_text": "#111827",
-                "secondary_text": "#1f2937",
-                "muted_text": "#4b5563",
-                "tab_border": "#e5e7eb",
-                "tab_selected_bg": "#f3f4f6",
-                "tab_selected_text": "#111827",
-                "tab_hover_bg": "#e5e7eb",
-                "tab_unselected_text": "#4b5563",
-                "tab_selected_bottom": "#2563eb",
-                "card_bg": "#ffffff",
-                "card_border": "#e5e7eb",
-                "field_border": "#e5e7eb",
-                "tab_selected_border": "#e5e7eb",
-            }
+        return ui_palette()
 
 
 class TrendChartWidget(QWidget):
@@ -457,6 +437,11 @@ class TrendChartWidget(QWidget):
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
         if hasattr(self, "setAutoFillBackground"):
             self.setAutoFillBackground(True)
+
+    def apply_theme(self, palette: Dict[str, str], accent: str) -> None:
+        self._palette = palette
+        self._accent = QColor(accent)
+        self.update()
 
     def set_points(self, points: Sequence[Tuple[int, float]]) -> None:
         self._points = list(points)

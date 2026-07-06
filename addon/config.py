@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import math
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -76,7 +78,8 @@ def _coerce_float(value: Any, default: float) -> float:
     if value is None:
         return default
     try:
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else default
     except (TypeError, ValueError):
         return default
 
@@ -91,12 +94,13 @@ def _normalize_dimension(value: Any) -> str:
     value_str = str(value).strip()
     if not value_str:
         return ""
-    # Allow units supplied by the user, defaulting to px for digits
-    if value_str[-2:].lower() in {"px", "pt", "em"} or value_str.endswith("%"):
-        return value_str
-    if value_str.isdigit():
-        return f"{value_str}px"
-    return value_str
+    # Only permit non-negative CSS dimensions. Older configs may contain
+    # strings, but arbitrary text must never be interpolated into a stylesheet.
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)(px|pt|em|rem|%)?", value_str, re.IGNORECASE)
+    if match is None:
+        return ""
+    number, unit = match.groups()
+    return f"{number}{unit or 'px'}"
 
 
 def _to_qcolor(color_value: str) -> QColor:
@@ -231,7 +235,7 @@ def _validate_theme(
     opacity = _coerce_int(overrides.get("opacity"), defaults.get("opacity", 100))
     if opacity < 0 or opacity > 100:
         errors.append(f"{path}.opacity must be 0-100; using {defaults.get('opacity', 100)}.")
-        opacity = max(0, min(100, opacity))
+        opacity = defaults.get("opacity", 100)
     return ThemeSettings(text=text, background=background, foreground=foreground, border_radius=border_radius, opacity=opacity)
 
 
@@ -315,7 +319,9 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
             if value_raw is None:
                 raise ValueError
             value = float(value_raw)
-            conversion_failed = False
+            conversion_failed = not math.isfinite(value)
+            if conversion_failed:
+                value = default
         except (TypeError, ValueError):
             value = default
             conversion_failed = value_raw is not None
@@ -516,7 +522,7 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     default_day = {
         "text": "#111827",
         "background": "#e7edf3",
-        "foreground": "#12a8cc",
+        "foreground": "#0e7490",
         "border_radius": 0,
         "opacity": 100,
     }
@@ -529,6 +535,9 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     }
 
     appearance = config_data.get("appearance", {})
+    if not isinstance(appearance, dict):
+        errors.append("appearance must be an object; using defaults.")
+        appearance = {}
     day_overrides = appearance.get("day", {}) if isinstance(appearance, dict) else {}
     night_overrides = appearance.get("night", {}) if isinstance(appearance, dict) else {}
     if not isinstance(day_overrides, dict):
@@ -544,11 +553,13 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     theme_is_night = resolve_theme_mode(theme) == "dark"
     active_theme = night_theme if theme_is_night else day_theme
 
-    segment_color_config = config_data.get("segment_colors", {}) if isinstance(config_data.get("segment_colors"), dict) else {}
+    segment_color_config = config_data.get("segment_colors", {})
     if not isinstance(segment_color_config, dict):
         errors.append("segment_colors must be an object; using defaults.")
         segment_color_config = {}
-    default_segment_colors = {"new": "#4aa3df", "learning": "#f0c674", "review": "#50c878"}
+    # These defaults retain at least 3:1 contrast against both built-in tracks.
+    # Explicit user colors remain authoritative.
+    default_segment_colors = {"new": "#378ba5", "learning": "#aa7926", "review": "#41965a"}
     segment_colors = {
         "new": _color_or_default(segment_color_config.get("new"), default_segment_colors["new"], "segment_colors.new", errors),
         "learning": _color_or_default(segment_color_config.get("learning"), default_segment_colors["learning"], "segment_colors.learning", errors),
