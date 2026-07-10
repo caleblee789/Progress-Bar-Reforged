@@ -1,6 +1,7 @@
 from __future__ import unicode_literals
 import re
 import sys
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 from copy import deepcopy
 from pathlib import Path
@@ -23,9 +24,6 @@ from .ui.theme import (
     shortcut_qss,
     ui_palette,
 )
-
-from anki.hooks import addHook, wrap
-from anki import version as anki_version
 
 from aqt.qt import *
 try:
@@ -53,47 +51,182 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from aqt import gui_hooks
+from .progress import ProgressState
+from .progress.lifecycle import register_once
+from .progress import scheduler as progress_scheduler
+from .ui.metrics import horizontal_advance, widget_text_width
 
 settings: Settings
 config: Dict[str, Any] = {}
 _validation_errors: List[str] = []
+_logger = logging.getLogger(__name__)
+_reported_ui_failures: set[str] = set()
+
+
+def _report_ui_failure(operation: str, exc: BaseException) -> None:
+    """Keep non-fatal Qt fallbacks visible without flooding paint events."""
+
+    if operation in _reported_ui_failures:
+        return
+    _reported_ui_failures.add(operation)
+    _logger.warning("Progress Bar UI fallback in %s: %s", operation, exc, exc_info=True)
 
 # Set up variables
 
-remainCount: Dict[int, float] = {}
-doneCount: Dict[int, float] = {}
-totalCount: Dict[int, float] = {}
-# Store raw (unweighted) counts alongside weighted counts to ensure accurate numbers in the UI.
-rawRemainCount: Dict[int, int] = {}
-rawDoneCount: Dict[int, int] = {}
-rawTotalCount: Dict[int, int] = {}
-# Track actionable (non-buried) and buried queue counts separately per deck so we can
-# present an accurate breakdown in the tooltip and ensure "left" only sums actionable cards.
-actionableRevCount: Dict[int, int] = {}
-actionableLrnCount: Dict[int, int] = {}
-actionableNewCount: Dict[int, int] = {}
-buriedRevCount: Dict[int, int] = {}
-buriedLrnCount: Dict[int, int] = {}
-buriedNewCount: Dict[int, int] = {}
-# NOTE: did stands for 'deck id'
-# For old API of deckDueList(), these counts don't include cards in children decks. For new deck_due_tree(), they do.
-
-currDID: Optional[int] = None  # current deck id (None means at the deck browser)
+_progress_state = ProgressState()
+# Compatibility aliases for third-party callers that historically imported these
+# dictionaries. New controller code uses _progress_state directly.
+remainCount = _progress_state.remaining
+doneCount = _progress_state.completed
+totalCount = _progress_state.total
+rawRemainCount = _progress_state.raw_remaining
+rawDoneCount = _progress_state.raw_completed
+rawTotalCount = _progress_state.raw_total
+actionableRevCount = _progress_state.actionable_review
+actionableLrnCount = _progress_state.actionable_learning
+actionableNewCount = _progress_state.actionable_new
+buriedRevCount = _progress_state.buried_review
+buriedLrnCount = _progress_state.buried_learning
+buriedNewCount = _progress_state.buried_new
+currDID: Optional[int] = None  # Compatibility mirror; controller state is canonical.
 _current_main_window_state: Optional[str] = "deckBrowser"
 _warning_active = False
 _deck_breakdown_dialog: Optional["DeckBreakdownDialog"] = None
 _session_history_dialog: Optional[SessionHistoryDialog] = None
-_latest_breakdown_rows: List[Dict[str, Any]] = []
-_latest_breakdown_summary: Optional[Dict[str, Any]] = None
-_last_cards_per_minute: Optional[float] = None
+_TODAY_PACE_MIN_CARDS = 5
 DONATE_URL = "https://www.buymeacoffee.com/caleblee78f"
 DONATE_TOOLTIP = "Donate to support the creator"
 DONATE_IMAGE_PATH = Path(__file__).resolve().parent / "assets" / "buy_me_a_coffee.png"
+CALEB_ADDONS_MENU_TITLE = "Caleb M. Add-ons Settings"
+CALEB_ADDONS_MENU_OBJECT_NAME = "caleb_m_addons_menu"
 
 def __getattr__(name: str):
     if name in {"progressBar", "toggle_shortcut"}:
         return getattr(progress_ui, name)
+    if name == "_last_cards_per_minute":
+        return _progress_state.last_cards_per_minute
+    if name == "_latest_breakdown_rows":
+        return _progress_state.latest_breakdown_rows
+    if name == "_latest_breakdown_summary":
+        return _progress_state.latest_breakdown_summary
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _qt_object_name(widget: Any) -> str:
+    getter = getattr(widget, "objectName", None)
+    if callable(getter):
+        try:
+            return str(getter())
+        except Exception:
+            return ""
+    return str(getter or "")
+
+
+def _qt_menu_title(menu: Any) -> str:
+    getter = getattr(menu, "title", None)
+    if callable(getter):
+        try:
+            return str(getter())
+        except Exception:
+            return ""
+    return str(getter or "")
+
+
+def _qt_action_text(action: Any) -> str:
+    text = getattr(action, "text", None)
+    if callable(text):
+        try:
+            return str(text())
+        except Exception:
+            return ""
+    return str(text or getattr(action, "label", ""))
+
+
+def _menu_actions(menu: Any) -> List[Any]:
+    actions_attr = getattr(menu, "actions", None)
+    try:
+        actions = actions_attr() if callable(actions_attr) else actions_attr
+    except Exception:
+        actions = []
+    return list(actions or [])
+
+
+def _set_caleb_menu_object_name(menu: Any) -> None:
+    setter = getattr(menu, "setObjectName", None)
+    if callable(setter):
+        try:
+            setter(CALEB_ADDONS_MENU_OBJECT_NAME)
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _report_ui_failure("set settings menu object name", exc)
+
+
+def _iter_submenus(menu: Any):
+    for submenu in getattr(menu, "submenus", []) or []:
+        if submenu is not None:
+            yield submenu
+
+    for action in _menu_actions(menu):
+        if isinstance(action, tuple) and len(action) >= 2:
+            action = action[1]
+        menu_getter = getattr(action, "menu", None)
+        if not callable(menu_getter):
+            continue
+        try:
+            submenu = menu_getter()
+        except Exception:
+            submenu = None
+        if submenu is not None:
+            yield submenu
+
+
+def _get_caleb_addons_menu(menu_bar: Any):
+    existing = getattr(mw, "_caleb_m_addons_menu", None)
+    if existing is not None:
+        return existing
+
+    for submenu in _iter_submenus(menu_bar):
+        if (
+            _qt_object_name(submenu) == CALEB_ADDONS_MENU_OBJECT_NAME
+            or _qt_menu_title(submenu) == CALEB_ADDONS_MENU_TITLE
+        ):
+            _set_caleb_menu_object_name(submenu)
+            mw._caleb_m_addons_menu = submenu
+            return submenu
+
+    add_menu = getattr(menu_bar, "addMenu", None)
+    if not callable(add_menu):
+        return menu_bar
+
+    submenu = add_menu(CALEB_ADDONS_MENU_TITLE)
+    _set_caleb_menu_object_name(submenu)
+    mw._caleb_m_addons_menu = submenu
+    return submenu
+
+
+def _install_settings_menu_action() -> None:
+    existing = getattr(mw, "_progress_bar_settings_action", None)
+    if existing is not None:
+        return
+
+    menu_bar = getattr(getattr(mw, "form", None), "menubar", None)
+    if menu_bar is None:
+        menu_bar_getter = getattr(mw, "menuBar", None)
+        menu_bar = menu_bar_getter() if callable(menu_bar_getter) else None
+    if menu_bar is None or not hasattr(menu_bar, "addMenu"):
+        return
+
+    submenu = _get_caleb_addons_menu(menu_bar)
+    for action in _menu_actions(submenu):
+        if isinstance(action, tuple) and len(action) >= 2:
+            action = action[1]
+        if _qt_action_text(action) == "Progress Bar settings":
+            mw._progress_bar_settings_action = action
+            return
+
+    settings_action = QAction("Progress Bar settings", mw)
+    settings_action.triggered.connect(_open_config_dialog)
+    submenu.addAction(settings_action)
+    mw._progress_bar_settings_action = settings_action
 
 lrn_weight = 1.0
 new_weight = 1.0
@@ -166,10 +299,6 @@ def _apply_config(new_config: Dict[str, Any]) -> None:
 _reload_settings(show_messages=True)
 
 PERSISTED_PROGRESS_KEY = "progress_bar_persistent_counts"
-_progress_restored = False
-_restored_day_stamp: Optional[int] = None
-_last_persisted_snapshot: Optional[Dict[str, Any]] = None
-_last_persisted_ts = 0.0
 _PERSIST_INTERVAL_SECONDS = 15.0
 
 
@@ -183,38 +312,16 @@ def _current_day_stamp() -> int:
 
 
 def _prepare_counts_for_new_profile() -> None:
-    global _progress_restored
-    global _restored_day_stamp
-    global _last_persisted_snapshot
-    global _last_persisted_ts
-    remainCount.clear()
-    doneCount.clear()
-    totalCount.clear()
-    rawRemainCount.clear()
-    rawDoneCount.clear()
-    rawTotalCount.clear()
-    actionableRevCount.clear()
-    actionableLrnCount.clear()
-    actionableNewCount.clear()
-    buriedRevCount.clear()
-    buriedLrnCount.clear()
-    buriedNewCount.clear()
-    _progress_restored = False
-    _restored_day_stamp = None
-    _last_persisted_snapshot = None
-    _last_persisted_ts = 0.0
+    _progress_state.reset_for_profile()
 
 
 def _ensure_persisted_progress_loaded() -> None:
-    global _progress_restored
-    global _restored_day_stamp
-
     today = _current_day_stamp()
 
-    if _progress_restored and _restored_day_stamp == today:
+    if _progress_state.progress_restored and _progress_state.restored_day_stamp == today:
         return
 
-    if _progress_restored and _restored_day_stamp != today:
+    if _progress_state.progress_restored and _progress_state.restored_day_stamp != today:
         _prepare_counts_for_new_profile()
 
     if mw.pm is None or mw.col is None:
@@ -222,14 +329,14 @@ def _ensure_persisted_progress_loaded() -> None:
 
     profile = getattr(mw.pm, "profile", None)
     if not isinstance(profile, dict):
-        _progress_restored = True
-        _restored_day_stamp = today
+        _progress_state.progress_restored = True
+        _progress_state.restored_day_stamp = today
         return
 
     stored = profile.get(PERSISTED_PROGRESS_KEY)
     if not isinstance(stored, dict):
-        _progress_restored = True
-        _restored_day_stamp = today
+        _progress_state.progress_restored = True
+        _progress_state.restored_day_stamp = today
         return
 
     try:
@@ -239,16 +346,16 @@ def _ensure_persisted_progress_loaded() -> None:
     if stored_day != today:
         profile.pop(PERSISTED_PROGRESS_KEY, None)
         mw.pm.save()
-        _progress_restored = True
-        _restored_day_stamp = today
+        _progress_state.progress_restored = True
+        _progress_state.restored_day_stamp = today
         return
 
     data = stored.get("data")
     if not isinstance(data, dict):
         profile.pop(PERSISTED_PROGRESS_KEY, None)
         mw.pm.save()
-        _progress_restored = True
-        _restored_day_stamp = today
+        _progress_state.progress_restored = True
+        _progress_state.restored_day_stamp = today
         return
 
     for did_key, counts in data.items():
@@ -286,14 +393,11 @@ def _ensure_persisted_progress_loaded() -> None:
         rawDoneCount[did] = raw_done
         rawTotalCount[did] = raw_total
 
-    _progress_restored = True
-    _restored_day_stamp = today
+    _progress_state.progress_restored = True
+    _progress_state.restored_day_stamp = today
 
 
 def _persist_progress_snapshot(*, force: bool = False) -> None:
-    global _last_persisted_snapshot
-    global _last_persisted_ts
-
     if mw.pm is None or mw.col is None:
         return
 
@@ -322,8 +426,8 @@ def _persist_progress_snapshot(*, force: bool = False) -> None:
         }
 
     now = time.monotonic()
-    persisted_changed = snapshot != _last_persisted_snapshot
-    too_soon = (now - _last_persisted_ts) < _PERSIST_INTERVAL_SECONDS
+    persisted_changed = snapshot != _progress_state.last_snapshot
+    too_soon = (now - _progress_state.last_persisted_ts) < _PERSIST_INTERVAL_SECONDS
 
     if not force and too_soon:
         return
@@ -343,8 +447,8 @@ def _persist_progress_snapshot(*, force: bool = False) -> None:
     history.update_daily_history(profile, today, deck_ids_for_query, _revlog_stats_between)
 
     mw.pm.save()
-    _last_persisted_snapshot = snapshot
-    _last_persisted_ts = now
+    _progress_state.last_snapshot = snapshot
+    _progress_state.last_persisted_ts = now
 
 
 def add_info():
@@ -397,7 +501,7 @@ def add_info():
     rev_weight = float((1 + (1 * tr * settings.lrn_steps)) / 1)
 
 
-gui_hooks.main_window_did_init.append(add_info)
+register_once(gui_hooks.main_window_did_init, add_info, "main_window_did_init")
 
 
 def initPB() -> None:
@@ -419,7 +523,7 @@ def _remove_progress_bar() -> None:
 
 def _reinitialize_progress_bar() -> None:
     """Recreate the progress bar with the latest configuration and refresh counts."""
-    if not _should_show_progress_bar_for_state(_current_main_window_state):
+    if not _should_show_progress_bar_for_state(_progress_state.main_window_state):
         _remove_progress_bar()
         return
     progress_ui.reinitialize_progress_bar()
@@ -433,11 +537,13 @@ def _reinitialize_progress_bar() -> None:
 def _should_show_progress_bar_for_state(state: Optional[str]) -> bool:
     if not settings.progress_bar_enabled:
         return False
-    if state == "deckBrowser":
-        return settings.display_location == "review_and_home"
     if state == "profileManager":
         return False
-    return True
+    if settings.display_location == "review":
+        return state == "review"
+    if state in {"deckBrowser", "overview", "review"}:
+        return settings.display_location == "review_and_home"
+    return False
 
 
 def _find_node_by_id(node, deck_id: int):
@@ -458,166 +564,21 @@ def _collect_deck_ids(node) -> List[int]:
 
 
 def _done_counts_by_deck_since(cutoff: int) -> Dict[int, Tuple[int, int, int]]:
-    """Return counts of completed cards by deck, grouped by card state.
-
-    Deck IDs are resolved against the original deck for cards that were
-    reviewed in a filtered deck so that progress attaches to the owning deck.
-    """
-    rows = mw.col.db.all(
-        """
-        select
-            coalesce(nullif(c.odid, 0), c.did) as deck_id,
-            sum(case when r.type in (1, 3) then 1 else 0 end) as rev_done,
-            sum(case when r.type in (0, 2) and not (r.type = 0 and r.lastIvl = 0) then 1 else 0 end) as lrn_done,
-            sum(case when r.type = 0 and r.lastIvl = 0 then 1 else 0 end) as new_done
-        from revlog r
-        join cards c on c.id = r.cid
-        where r.id > ?
-        group by deck_id
-        """,
-        cutoff,
-    )
-
-    done_by_deck: Dict[int, Tuple[int, int, int]] = {}
-    for deck_id, rev_done, lrn_done, new_done in rows:
-        done_by_deck[int(deck_id)] = (
-            int(rev_done or 0),
-            int(lrn_done or 0),
-            int(new_done or 0),
-        )
-    return done_by_deck
+    return progress_scheduler.completed_counts_by_deck(mw.col.db, cutoff)
 
 
 def _queue_counts_for_node(node) -> Tuple[int, int, int, int, int, int]:
-    """Return the remaining queue counts for the provided deck tree node.
-
-    The raw deck tree counts provided by the scheduler already factor in
-    deck limits and due dates, but they can still include cards that are
-    temporarily hidden from the reviewer (for example, buried siblings).
-    To keep the progress bar aligned with what the reviewer will
-    actually see, we combine both data sources: we cap the active card
-    counts derived from the cards table to the scheduler's notion of how
-    many cards are due today. This prevents cards that are merely
-    unsuspended but not due from inflating the "left" number and excludes
-    intraday buried cards from the remaining total."""
-
-    deck_ids = list(dict.fromkeys(_collect_deck_ids(node)))
-
-    # Scheduler-provided limits for the deck (already respects child decks).
-    sched_rev = int(getattr(node, "review_count", 0) or 0)
-    sched_lrn = int(getattr(node, "learn_count", 0) or 0)
-    sched_new = int(getattr(node, "new_count", 0) or 0)
-
-    if not deck_ids:
-        return sched_rev, sched_lrn, sched_new, 0, 0, 0
-
-    placeholders = ",".join(["?"] * len(deck_ids))
-    visible_query = f"""
-        select
-            sum(case when queue = 2 then 1 else 0 end),
-            sum(case when queue in (1, 3) then 1 else 0 end),
-            sum(case when queue = 0 then 1 else 0 end),
-            sum(case when queue in (-2, -3) and type = 2 then 1 else 0 end),
-            sum(case when queue in (-2, -3) and type in (1, 3) then 1 else 0 end),
-            sum(case when queue in (-2, -3) and type = 0 then 1 else 0 end)
-        from cards
-        where queue in (0, 1, 2, 3, -2, -3)
-          and did in ({placeholders})
-    """
-
-    counts = mw.col.db.first(visible_query, *deck_ids) or (0, 0, 0, 0, 0, 0)
-    raw_rev, raw_lrn, raw_new, buried_rev, buried_lrn, buried_new = (
-        int(count or 0) for count in counts
+    return progress_scheduler.queue_counts_for_node(
+        mw.col.db, mw.col.sched, node, _collect_deck_ids
     )
-
-    # Cards with queue -2/-3 are hidden for now, but they'll still need to be
-    # reviewed later in the day. The scheduler counts already reflect deck
-    # limits, so we cap the visible cards to that limit. Buried cards are
-    # intentionally excluded so that the remaining total only reflects cards
-    # that can actually appear during the current session.
-    rev_visible = min(raw_rev, sched_rev)
-    lrn_visible = min(raw_lrn, sched_lrn)
-
-    # When the scheduler includes buried new siblings in its deck limits, trim
-    # them out so the remaining count only reflects cards that can actually
-    # appear. Only subtract the portion that may be inflating the scheduler
-    # total to avoid under-counting when the scheduler already excluded buried
-    # cards (or the deck limit is lower than the actionable new supply).
-    buried_overhang = max(0, sched_new - raw_new)
-    buried_overlap = min(buried_new, buried_overhang)
-    sched_new_visible = max(0, sched_new - buried_overlap)
-    new_visible = min(raw_new, sched_new_visible)
-
-    rev_count = rev_visible
-    lrn_count = lrn_visible
-    new_count = new_visible
-
-    return rev_count, lrn_count, new_count, buried_rev, buried_lrn, buried_new
 
 
 def _revlog_stats_since(cutoff: int, deck_ids: List[int]):
-    base_query = """
-        select
-        sum(case when r.ease >= 1 then 1 else 0 end),
-        sum(case when r.ease = 1 then 1 else 0 end),
-        sum(case when r.ease = 1 and r.type = 1 then 1 else 0 end),
-        sum(case when r.ease > 1 and r.type = 1 then 1 else 0 end),
-        sum(case when r.ease > 1 and r.type = 1 and r.lastIvl >= 100 then 1 else 0 end),
-        sum(case when r.ease = 1 and r.type = 1 and r.lastIvl >= 100 then 1 else 0 end),
-        sum(r.time)/1000
-        from revlog r
-    """
-
-    if not deck_ids:
-        query = base_query + """
-        where r.id > ?
-    """
-        params: List[int] = [cutoff]
-    else:
-        placeholders = ",".join(["?"] * len(deck_ids))
-        # Include original deck id for cards coming from filtered decks.
-        query = base_query + f"""
-        join cards c on c.id = r.cid
-        where r.id > ?
-          and (c.did in ({placeholders}) or (c.odid != 0 and c.odid in ({placeholders})))
-    """
-        params = [cutoff] + deck_ids + deck_ids
-
-    return mw.col.db.first(query, *params)
+    return progress_scheduler.revlog_stats(mw.col.db, cutoff, None, deck_ids)
 
 
 def _revlog_stats_between(start: int, end: int, deck_ids: List[int]):
-    """Aggregate revlog metrics in the half-open interval [start, end).
-
-    Mirrors the columns returned by _revlog_stats_since.
-    """
-    base_query = """
-        select
-        sum(case when r.ease >= 1 then 1 else 0 end),
-        sum(case when r.ease = 1 then 1 else 0 end),
-        sum(case when r.ease = 1 and r.type = 1 then 1 else 0 end),
-        sum(case when r.ease > 1 and r.type = 1 then 1 else 0 end),
-        sum(case when r.ease > 1 and r.type = 1 and r.lastIvl >= 100 then 1 else 0 end),
-        sum(case when r.ease = 1 and r.type = 1 and r.lastIvl >= 100 then 1 else 0 end),
-        sum(r.time)/1000
-        from revlog r
-    """
-
-    if not deck_ids:
-        query = base_query + """
-        where r.id >= ? and r.id < ?
-    """
-        params: List[int] = [start, end]
-    else:
-        placeholders = ",".join(["?"] * len(deck_ids))
-        query = base_query + f"""
-        join cards c on c.id = r.cid
-        where r.id >= ? and r.id < ?
-          and (c.did in ({placeholders}) or (c.odid != 0 and c.odid in ({placeholders})))
-    """
-        params = [start, end] + deck_ids + deck_ids
-
-    return mw.col.db.first(query, *params)
+    return progress_scheduler.revlog_stats(mw.col.db, start, end, deck_ids)
 
 
 def _current_tzinfo():
@@ -627,6 +588,45 @@ def _current_tzinfo():
         else timezone(timedelta(hours=settings.tz))
     )
     return tzinfo or timezone.utc
+
+
+def _historical_seconds_per_card(today: int) -> Optional[float]:
+    profile = getattr(getattr(mw, "pm", None), "profile", None)
+    if not isinstance(profile, dict):
+        return None
+
+    total_cards = 0
+    total_seconds = 0.0
+    for entry in history.read_history_records(profile):
+        if int(entry.get("day", 0)) == today:
+            continue
+        cards = int(entry.get("cards", 0) or 0)
+        avg_seconds = float(entry.get("avg_seconds", 0.0) or 0.0)
+        if cards <= 0 or avg_seconds <= 0:
+            continue
+        total_cards += cards
+        total_seconds += avg_seconds * cards
+
+    if total_cards <= 0 or total_seconds <= 0:
+        return None
+    return total_seconds / total_cards
+
+
+def _pace_estimate_for_today(cards_today: int, seconds_today: int) -> Optional[Tuple[float, str]]:
+    if cards_today >= _TODAY_PACE_MIN_CARDS and seconds_today > 0:
+        return (max(1.0, float(seconds_today)) / cards_today, "today")
+
+    historical_seconds = _historical_seconds_per_card(_current_day_stamp())
+    if historical_seconds and historical_seconds > 0:
+        return (historical_seconds, "history")
+
+    return None
+
+
+def _pace_projection_text(source: str) -> str:
+    if source == "today":
+        return "Projected time remaining based on today's pace."
+    return "Projected time remaining based on previous averages."
 
 
 def _format_eta_time(seconds_remaining: int, tzinfo) -> str:
@@ -670,14 +670,12 @@ def _deck_breakdown_for_node(node, cards_per_minute: Optional[float], tzinfo):
 
 
 def _update_breakdown_rows(target_nodes, cards_per_minute: Optional[float]) -> None:
-    global _latest_breakdown_rows
-    global _latest_breakdown_summary
     tzinfo = _current_tzinfo()
-    _latest_breakdown_rows = [
+    _progress_state.latest_breakdown_rows = [
         _deck_breakdown_for_node(node, cards_per_minute, tzinfo) for node in target_nodes
     ]
-    _latest_breakdown_summary = _build_breakdown_summary(
-        _latest_breakdown_rows, cards_per_minute, tzinfo
+    _progress_state.latest_breakdown_summary = _build_breakdown_summary(
+        _progress_state.latest_breakdown_rows, cards_per_minute, tzinfo
     )
     _refresh_breakdown_dialog()
 
@@ -686,7 +684,9 @@ def _refresh_breakdown_dialog() -> None:
     global _deck_breakdown_dialog
     if _deck_breakdown_dialog is not None:
         try:
-            _deck_breakdown_dialog.update_rows(_latest_breakdown_rows, _latest_breakdown_summary)
+            _deck_breakdown_dialog.update_rows(
+                _progress_state.latest_breakdown_rows, _progress_state.latest_breakdown_summary
+            )
         except RuntimeError:
             _deck_breakdown_dialog = None
 
@@ -720,7 +720,20 @@ def _fit_progress_bar_format(full_text: str, compact_text: str, minimal_text: st
     if getattr(settings, "compact_mode", False):
         return compact_text
     try:
-        available = max(0, int(bar.width()) - 16)
+        width_candidates: List[int] = []
+        for widget in (bar, getattr(bar, "parentWidget", lambda: None)(), getattr(progress_ui, "progress_dock", None)):
+            width_getter = getattr(widget, "width", None)
+            if callable(width_getter):
+                width_candidates.append(int(width_getter()))
+        if getattr(settings, "orientation", None) == Qt.Orientation.Horizontal and getattr(settings, "dock_area", None) in (
+            Qt.DockWidgetArea.TopDockWidgetArea,
+            Qt.DockWidgetArea.BottomDockWidgetArea,
+        ):
+            main_width_getter = getattr(mw, "width", None)
+            if callable(main_width_getter):
+                width_candidates.append(int(main_width_getter()))
+        live_width = max([width for width in width_candidates if width > 0], default=0)
+        available = max(0, live_width - 16)
         metrics = bar.fontMetrics()
         measure = getattr(metrics, "horizontalAdvance", None)
         if not callable(measure):
@@ -746,7 +759,7 @@ def _open_deck_breakdown_dialog() -> None:
             _deck_breakdown_dialog = DeckBreakdownDialog(mw)
 
     _deck_breakdown_dialog.request_auto_fit()
-    _deck_breakdown_dialog.update_rows(_latest_breakdown_rows)
+    _deck_breakdown_dialog.update_rows(_progress_state.latest_breakdown_rows)
     _deck_breakdown_dialog.show()
     _deck_breakdown_dialog.raise_()
     _deck_breakdown_dialog.activateWindow()
@@ -878,13 +891,11 @@ def updatePB():
     # Learning 0, Review 239 (+3 buried) => actionable_left = 139 + 0 + 239 = 378.
     var_diff = actionable_left
 
-    if raw_done > 0:
+    if cards > 0:
         safe_time = max(thetime, 1)
-        speed = (raw_done / safe_time) * 60
-        secspeed_value = safe_time / raw_done
+        secspeed_value = safe_time / cards
         secspeed_display = f"{secspeed_value:.02f}"
     else:
-        speed = 0
         secspeed_value = 0
         secspeed_display = "N/A"
 
@@ -896,10 +907,17 @@ def updatePB():
         ysecspeed_value = 0
         ysecspeed_display = "N/A"
 
-    if speed > 0:
-        seconds_remaining = int(round((var_diff / speed) * 60))
+    pace_estimate = _pace_estimate_for_today(int(cards), int(thetime))
+    if pace_estimate is not None:
+        pace_seconds_per_card, pace_source = pace_estimate
+        speed = 60.0 / pace_seconds_per_card
+        seconds_remaining = int(round(var_diff * pace_seconds_per_card))
+        projection_text = _pace_projection_text(pace_source)
     else:
+        speed = 0
         seconds_remaining = 0
+        pace_source = ""
+        projection_text = "Projected time remaining is unavailable until enough review history is available."
 
     # Daily goal tracking
     card_goal = max(0, settings.daily_target_cards)
@@ -936,16 +954,7 @@ def updatePB():
     hrmin = (seconds_remaining % 3600) // 60
 
     # ETA display using system timezone by default, or the configured offset when overridden
-    eta_display = "N/A"
-    if seconds_remaining > 0:
-        tzinfo = datetime.now().astimezone().tzinfo if settings.use_system_timezone else timezone(timedelta(hours=settings.tz))
-        tzinfo = tzinfo or timezone.utc
-        now_tz = datetime.now(tz=tzinfo)
-        eta_dt = now_tz + timedelta(seconds=seconds_remaining)
-        eta_display = eta_dt.strftime("%I:%M %p")
-        days_ahead = (eta_dt.date() - now_tz.date()).days
-        if days_ahead > 0:
-            eta_display = f"{eta_display}+{days_ahead}"
+    eta_display = _format_eta_time(seconds_remaining, _current_tzinfo())
 
     cutoff_seconds = 0
     if mw.col is not None and getattr(mw.col, "sched", None) is not None:
@@ -1042,7 +1051,8 @@ def updatePB():
         if remaining_minutes_goal is not None:
             goal_tooltip_lines.append(f"Minutes remaining to goal: {remaining_minutes_goal:.0f}.")
         if projected_total_minutes is not None:
-            goal_tooltip_lines.append(f"Projected total time at current pace: {projected_total_minutes:.0f} minutes.")
+            pace_label = "today's pace" if pace_source == "today" else "previous averages"
+            goal_tooltip_lines.append(f"Projected total time using {pace_label}: {projected_total_minutes:.0f} minutes.")
 
     if projected_finish_after_cutoff is not None and cutoff_seconds > 0:
         cutoff_delta_minutes = projected_finish_after_cutoff / 60.0
@@ -1091,30 +1101,22 @@ def updatePB():
         if speed > 0:
             output += f"     |     {hrhr:02d}:{hrmin:02d} more"
             output += f"     |     ETA {eta_display}"
-            tooltip_lines.append(
-                "Projected time remaining based on your current pace."
-            )
+            tooltip_lines.append(projection_text)
             tooltip_lines.append(
                 f"Estimated finish time adjusted for your {'system' if settings.use_system_timezone else 'custom'} timezone: {eta_display}."
             )
-            remaining_tooltip_lines.append(
-                "Projected time remaining based on your current pace."
-            )
+            remaining_tooltip_lines.append(projection_text)
             remaining_tooltip_lines.append(
                 f"Estimated finish time adjusted for your {'system' if settings.use_system_timezone else 'custom'} timezone: {eta_display}."
             )
         else:
             output += "     |     --:-- more"
             output += "     |     ETA N/A"
+            tooltip_lines.append(projection_text)
             tooltip_lines.append(
-                "Projected time remaining is unavailable until at least one card is answered."
+                "Estimated finish time unavailable until enough review history or today's pace is available."
             )
-            tooltip_lines.append(
-                "Estimated finish time unavailable until progress is made."
-            )
-            remaining_tooltip_lines.append(
-                "Projected time remaining is unavailable until at least one card is answered."
-            )
+            remaining_tooltip_lines.append(projection_text)
     elif settings.show_number:
         base_displayed = True
         if settings.show_percent:
@@ -1211,12 +1213,8 @@ def updatePB():
             output += "     |     Goals " + " · ".join(goal_text_parts)
         if speed > 0:
             output += f"     |     {hrhr:02d}:{hrmin:02d} more"
-            tooltip_lines.append(
-                "Projected time remaining based on your current pace."
-            )
-            remaining_tooltip_lines.append(
-                "Projected time remaining based on your current pace."
-            )
+            tooltip_lines.append(projection_text)
+            remaining_tooltip_lines.append(projection_text)
             output += f"     |     ETA {eta_display}"
             tooltip_lines.append(
                 f"Estimated finish time adjusted for your {'system' if settings.use_system_timezone else 'custom'} timezone: {eta_display}."
@@ -1226,16 +1224,12 @@ def updatePB():
             )
         else:
             output += "     |     --:-- more"
-            tooltip_lines.append(
-                "Projected time remaining is unavailable until at least one card is answered."
-            )
+            tooltip_lines.append(projection_text)
             output += "     |     ETA N/A"
             tooltip_lines.append(
-                "Estimated finish time unavailable until progress is made."
+                "Estimated finish time unavailable until enough review history or today's pace is available."
             )
-            remaining_tooltip_lines.append(
-                "Projected time remaining is unavailable until at least one card is answered."
-            )
+            remaining_tooltip_lines.append(projection_text)
         if settings.show_debug:
             output += f"     |     {new_weight:.02f} New Weight"
             tooltip_lines.append(
@@ -1350,9 +1344,8 @@ def updatePB():
         fraction=progress_fraction,
     )
 
-    global _last_cards_per_minute
-    _last_cards_per_minute = speed if speed > 0 else None
-    _update_breakdown_rows(target_nodes, _last_cards_per_minute)
+    _progress_state.last_cards_per_minute = speed if speed > 0 else None
+    _update_breakdown_rows(target_nodes, _progress_state.last_cards_per_minute)
 
     _persist_progress_snapshot()
 
@@ -1365,25 +1358,6 @@ def setScrollingPB() -> None:
         return
     progress_ui.set_scrolling_bar_state()
 
-
-def nmApplyStyle() -> None:
-    """Checks whether Night_Mode is disabled:
-        if so, we remove the separator here."""
-    global nmStyleApplied
-    if not nmUnavailable:
-        try:
-            nmStyleApplied = Night_Mode.nm_state_on
-        except Exception:
-            nmStyleApplied = 0
-    if not nmStyleApplied:
-        mw.setStyleSheet(
-            '''
-        QMainWindow::separator
-    {
-        width: 0px;
-        height: 0px;
-    }
-    ''')
 
 #used to calculate var_diff
 def calcProgress(rev: int, lrn: int, new: int) -> float:
@@ -1493,6 +1467,7 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
     global _current_main_window_state
 
     _current_main_window_state = state
+    _progress_state.main_window_state = state
 
     if not settings.progress_bar_enabled:
         _remove_progress_bar()
@@ -1504,6 +1479,7 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
         return
     elif state == "deckBrowser":
         currDID = None
+        _progress_state.current_deck_id = None
         if not _should_show_progress_bar_for_state(state):
             _remove_progress_bar()
             return
@@ -1513,12 +1489,17 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
     elif state == "profileManager":
         _remove_progress_bar()
         currDID = None
+        _progress_state.current_deck_id = None
         return
     else:  # "overview" or "review"
+        if not _should_show_progress_bar_for_state(state):
+            _remove_progress_bar()
+            return
         # showInfo("mw.col.decks.current()['id'])= %d" % mw.col.decks.current()['id'])
         if not progress_ui.progressBar:
             initPB()
         currDID = mw.col.decks.current()['id']
+        _progress_state.current_deck_id = currDID
 
     # showInfo("updateCountsForAllDecks(True), currDID = %d" % (currDID if currDID else 0))
     _ensure_persisted_progress_loaded()
@@ -1534,8 +1515,26 @@ def showQuestionCallBack() -> None:
     updatePB()
 
 
-addHook("afterStateChange", afterStateChangeCallBack)
-addHook("showQuestion", showQuestionCallBack)
+def _on_state_did_change(new_state: str, old_state: str) -> None:
+    """Modern Anki hook adapter for main-window state changes."""
+
+    afterStateChangeCallBack(new_state, old_state)
+
+
+def _on_reviewer_did_show_question(*_args: Any) -> None:
+    """Modern Anki hook adapter; the displayed card is not needed here."""
+
+    showQuestionCallBack()
+
+
+# The package supports Anki 2.1.49+, whose generated gui_hooks API replaces
+# the legacy string-based addHook callbacks.
+register_once(gui_hooks.state_did_change, _on_state_did_change, "state_did_change")
+register_once(
+    gui_hooks.reviewer_did_show_question,
+    _on_reviewer_did_show_question,
+    "reviewer_did_show_question",
+)
 
 
 def _on_profile_did_open() -> None:
@@ -1564,11 +1563,13 @@ def _on_profile_will_close() -> None:
     _remove_progress_bar()
     currDID = None
     _current_main_window_state = "profileManager"
+    _progress_state.current_deck_id = None
+    _progress_state.main_window_state = "profileManager"
     _prepare_counts_for_new_profile()
 
 
-gui_hooks.profile_did_open.append(_on_profile_did_open)
-gui_hooks.profile_will_close.append(_on_profile_will_close)
+register_once(gui_hooks.profile_did_open, _on_profile_did_open, "profile_did_open")
+register_once(gui_hooks.profile_will_close, _on_profile_will_close, "profile_will_close")
 
 
 def _on_theme_did_change(*_args) -> None:
@@ -1579,7 +1580,7 @@ def _on_theme_did_change(*_args) -> None:
 
 _theme_did_change_hook = getattr(gui_hooks, "theme_did_change", None)
 if _theme_did_change_hook is not None:
-    _theme_did_change_hook.append(_on_theme_did_change)
+    register_once(_theme_did_change_hook, _on_theme_did_change, "theme_did_change")
 
 
 def _current_theme_choice() -> str:
@@ -1877,8 +1878,8 @@ class ShortcutField(QWidget):
         if hasattr(self._editor, "setMaximumSequenceLength"):
             try:
                 self._editor.setMaximumSequenceLength(1)
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError, TypeError) as exc:
+                _report_ui_failure("set shortcut sequence length", exc)
         click_focus = getattr(getattr(Qt, "FocusPolicy", Qt), "ClickFocus", None)
         if click_focus is not None and hasattr(self._editor, "setFocusPolicy"):
             self._editor.setFocusPolicy(click_focus)
@@ -1958,13 +1959,13 @@ class ShortcutField(QWidget):
         if hasattr(self._editor, "clearFocus"):
             try:
                 self._editor.clearFocus()
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError) as exc:
+                _report_ui_failure("clear shortcut focus", exc)
         if refocus_web and hasattr(mw, "web") and hasattr(mw.web, "setFocus"):
             try:
                 mw.web.setFocus()
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError) as exc:
+                _report_ui_failure("restore reviewer focus", exc)
 
     def _apply_editor_palette(self) -> None:
         palette_cls = globals().get("QPalette")
@@ -2016,8 +2017,8 @@ class ShortcutField(QWidget):
                         child.setPalette(widget_palette)
                     if hasattr(child, "setAutoFillBackground"):
                         child.setAutoFillBackground(True)
-        except Exception:
-            pass
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _report_ui_failure("apply shortcut palette", exc)
 
     def _detect_conflict(self, sequence: QKeySequence) -> Optional[str]:
         if sequence.isEmpty():
@@ -2060,8 +2061,8 @@ class ShortcutField(QWidget):
 
 
 BREAKDOWN_INFO_TEXT = (
-    "Due today counts exclude buried siblings. Buried cards are listed separately. "
-    "ETAs appear once at least one card has been reviewed."
+    "Due today counts exclude buried siblings. Buried cards due today are listed separately. "
+    "ETAs use today's pace after 5 cards or previous averages before then."
 )
 _ETA_SORT_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*([AP]M)(?:\+(\d+))?$", re.IGNORECASE)
 
@@ -2290,8 +2291,8 @@ class _WorkloadSegmentBar(QWidget):
             if self._animation is not None and hasattr(self._animation, "stop"):
                 try:
                     self._animation.stop()
-                except Exception:
-                    pass
+                except (AttributeError, RuntimeError) as exc:
+                    _report_ui_failure("stop workload animation", exc)
             start = self._display_counts
             self._animation = animation_cls(self)
             try:
@@ -2372,8 +2373,8 @@ class _WorkloadSegmentBar(QWidget):
         if global_pos is not None:
             try:
                 QToolTip.showText(global_pos, tooltip_text, self)
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError, TypeError) as exc:
+                _report_ui_failure("show workload tooltip", exc)
 
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QPainter(self)
@@ -2571,12 +2572,16 @@ _BREAKDOWN_COLUMN_WIDTH_BOUNDS = {
 }
 
 
-def _count_cell_width_hint(counts: Any) -> int:
+def _count_cell_width_hint(counts: Any, metrics: Any = None) -> int:
+    """Return the painted count-cell width using the active Qt font metrics."""
+
     new, lrn, rev = _normalize_counts(counts)
     total = new + lrn + rev
-    total_width = max(24, len(str(total)) * 8)
-    chip_widths = [34 + (len(str(value)) * 8) for value in (new, lrn, rev)]
-    return max(_COUNT_CELL_MIN_WIDTH, 36 + total_width + sum(chip_widths) + 16)
+    total_width = horizontal_advance(metrics, total)
+    chip_widths = [horizontal_advance(metrics, f"{label} {value}") + 14 for label, value in (
+        ("N", new), ("L", lrn), ("R", rev),
+    )]
+    return max(_COUNT_CELL_MIN_WIDTH, 8 + total_width + 18 + sum(chip_widths) + 10)
 
 
 class _CountBreakdownDelegate(_StyledItemDelegateBase):
@@ -2609,15 +2614,16 @@ class _CountBreakdownDelegate(_StyledItemDelegateBase):
         if viewport is not None and hasattr(viewport, "update"):
             try:
                 viewport.update()
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError) as exc:
+                _report_ui_failure("refresh count delegate viewport", exc)
 
     def sizeHint(self, option, index):  # type: ignore[override]
         try:
             base = super().sizeHint(option, index)
             base_width = base.width() if callable(getattr(base, "width", None)) else getattr(base, "width", 170)
             base_height = base.height() if callable(getattr(base, "height", None)) else getattr(base, "height", 30)
-            width = max(_count_cell_width_hint(index.data(_BREAKDOWN_COUNTS_ROLE)), base_width)
+            metrics = getattr(option, "fontMetrics", None)
+            width = max(_count_cell_width_hint(index.data(_BREAKDOWN_COUNTS_ROLE), metrics), base_width)
             height = max(_COUNT_CELL_MIN_HEIGHT, base_height)
             return QSize(width, height)
         except Exception:
@@ -2628,8 +2634,8 @@ class _CountBreakdownDelegate(_StyledItemDelegateBase):
         if counts is None:
             try:
                 super().paint(painter, option, index)
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError, TypeError) as exc:
+                _report_ui_failure("paint default count cell", exc)
             return
 
         try:
@@ -2642,8 +2648,8 @@ class _CountBreakdownDelegate(_StyledItemDelegateBase):
                 super().paint(painter, blank_option, index)
             else:
                 super().paint(painter, option, index)
-        except Exception:
-            pass
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _report_ui_failure("paint count cell background", exc)
 
         try:
             new, lrn, rev = _normalize_counts(counts)
@@ -2697,11 +2703,12 @@ class _CountBreakdownDelegate(_StyledItemDelegateBase):
                 painter.drawText(chip_rect, flags, chip_text)
                 x_pos += chip_width + 5
             painter.restore()
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _report_ui_failure("paint count cell", exc)
             try:
                 super().paint(painter, option, index)
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError, TypeError) as fallback_exc:
+                _report_ui_failure("paint count cell fallback", fallback_exc)
 
 
 class DeckBreakdownDialog(QDialog):
@@ -2856,8 +2863,8 @@ class DeckBreakdownDialog(QDialog):
         if mode is not None and hasattr(header, "setSectionResizeMode"):
             try:
                 header.setSectionResizeMode(column, mode)
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError, TypeError) as exc:
+                _report_ui_failure("set deck header resize mode", exc)
 
     def _tree_viewport_width(self) -> int:
         if self._tree is None:
@@ -2885,8 +2892,8 @@ class DeckBreakdownDialog(QDialog):
             return
         try:
             self._tree.setColumnWidth(column, int(width))
-        except Exception:
-            pass
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            _report_ui_failure("set deck column width", exc)
 
     def _available_screen_width(self) -> Optional[int]:
         screen = None
@@ -2931,7 +2938,7 @@ class DeckBreakdownDialog(QDialog):
         self._auto_fit_pending = False
 
     def _text_width_hint(self, text: Any, padding: int = 28) -> int:
-        return max(72, (len(str(text or "")) * 8) + padding)
+        return widget_text_width(self._tree or self, text, padding=padding, minimum=72)
 
     def _column_content_width_hints(self, rows: List[Dict[str, Any]]) -> Dict[int, int]:
         hints = {
@@ -2947,8 +2954,10 @@ class DeckBreakdownDialog(QDialog):
 
         def visit(row: Dict[str, Any], depth: int = 0) -> None:
             hints[0] = max(hints[0], self._text_width_hint(row.get("name", ""), 44 + (depth * indentation)))
-            hints[1] = max(hints[1], _count_cell_width_hint(row.get("actionable", (0, 0, 0))))
-            hints[2] = max(hints[2], _count_cell_width_hint(row.get("buried", (0, 0, 0))))
+            metrics_getter = getattr(self._tree, "fontMetrics", None)
+            metrics = metrics_getter() if callable(metrics_getter) else None
+            hints[1] = max(hints[1], _count_cell_width_hint(row.get("actionable", (0, 0, 0)), metrics))
+            hints[2] = max(hints[2], _count_cell_width_hint(row.get("buried", (0, 0, 0)), metrics))
             hints[3] = max(hints[3], self._text_width_hint(row.get("eta", "N/A"), 40))
             for child in row.get("children", []):
                 visit(child, depth + 1)
@@ -2968,8 +2977,8 @@ class DeckBreakdownDialog(QDialog):
             if hasattr(self._tree, "resizeColumnToContents"):
                 try:
                     self._tree.resizeColumnToContents(column)
-                except Exception:
-                    pass
+                except (AttributeError, RuntimeError, TypeError) as exc:
+                    _report_ui_failure("measure deck column", exc)
             measured_widths[column] = max(self._column_width(column), content_hints.get(column, 0))
 
         applied_widths: Dict[int, int] = {}
@@ -3019,8 +3028,8 @@ class DeckBreakdownDialog(QDialog):
                 color = palette["eta_muted_text"]
             try:
                 item.setForeground(column, brush_cls(color_cls(color)))
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError, TypeError) as exc:
+                _report_ui_failure("style deck row", exc)
 
     def _add_row(self, row: Dict[str, Any], parent_item: Optional[QTreeWidgetItem] = None) -> QTreeWidgetItem:
         if self._tree is None or self._tree_widget_item_cls is None:
@@ -3049,8 +3058,8 @@ class DeckBreakdownDialog(QDialog):
                 parent_font = item.font(0)
                 parent_font.setBold(True)
                 item.setFont(0, parent_font)
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError, TypeError) as exc:
+                _report_ui_failure("style parent deck row", exc)
         if hasattr(item, "setToolTip"):
             item.setToolTip(0, name)
             item.setToolTip(1, _format_counts_accessible("Due today", actionable))
@@ -3131,14 +3140,13 @@ class ProgressBarConfigDialog(QDialog):
         self.show_smtr_cb = QCheckBox("Show SMTR")
 
         self.display_location_combo = QComboBox()
-        self.display_location_combo.addItem("Review and Home", "review_and_home")
         self.display_location_combo.addItem("Review Only", "review")
+        self.display_location_combo.addItem("Review and Home", "review_and_home")
         self.display_location_combo.setStyleSheet(field_style)
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Simple", "simple")
-        self.mode_combo.addItem("Time Left", "time_left")
-        self.mode_combo.addItem("Stats", "stats")
+        self.mode_combo.addItem("Advanced", "stats")
         self.mode_combo.setStyleSheet(field_style)
 
         self.dock_area_combo = QComboBox()
@@ -3152,7 +3160,9 @@ class ProgressBarConfigDialog(QDialog):
         self.theme_combo.addItem("Dark", "dark")
         self.theme_combo.setStyleSheet(field_style)
 
-        default_shortcut = "Meta+G" if sys.platform == "darwin" else "Ctrl+G"
+        # In Qt on macOS, Ctrl corresponds to the Command key. Meta would
+        # bind the physical Control key instead.
+        default_shortcut = "Ctrl+G"
         self.shortcut_field = ShortcutField(default_shortcut, palette)
 
         for control in (
@@ -3176,9 +3186,9 @@ class ProgressBarConfigDialog(QDialog):
 
         self._setting_rows = [
             SettingRow("Show On", "Choose whether the progress bar appears on the deck browser and during reviews, or only during reviews.", self.display_location_combo, palette),
-            SettingRow("Mode", "Simple shows counts, Time Left adds ETA, Stats shows the full metric label.", self.mode_combo, palette),
+            SettingRow("Mode", "Simple shows counts. Advanced adds ETA, retention, speed, and review metrics.", self.mode_combo, palette),
             SettingRow("Position", "Place the progress bar above or below the reviewer.", self.dock_area_combo, palette),
-            SettingRow("SMTR", "Show super-mature retention in the Stats progress label.", self.show_smtr_cb, palette),
+            SettingRow("SMTR", "Show super-mature retention in the Advanced progress label.", self.show_smtr_cb, palette),
             SettingRow("Theme", "Auto follows Anki; Light and Dark force the built-in themes.", self.theme_combo, palette),
             SettingRow("Shortcut", "Record the key sequence used to show or hide the progress bar.", self.shortcut_field, palette),
         ]
@@ -3307,13 +3317,15 @@ class ProgressBarConfigDialog(QDialog):
         self.progress_bar_enabled_cb.setChecked(_coerce_bool(cfg.get("progress_bar_enabled"), True))
         self.show_smtr_cb.setChecked(_coerce_bool(cfg.get("show_super_mature_retention"), False))
 
-        display_location = str(cfg.get("display_location", "review_and_home")).lower()
+        display_location = str(cfg.get("display_location", "review")).lower()
         if display_location not in {"review", "review_and_home"}:
-            display_location = "review_and_home"
+            display_location = "review"
         self.display_location_combo.setCurrentIndex(max(0, self.display_location_combo.findData(display_location)))
 
         mode = str(cfg.get("mode", "stats")).lower()
         if mode not in {"simple", "time_left", "stats"}:
+            mode = "stats"
+        if mode == "time_left":
             mode = "stats"
         self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(mode)))
 
@@ -3328,8 +3340,8 @@ class ProgressBarConfigDialog(QDialog):
         self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(theme)))
 
         shortcut = str(cfg.get("toggle_shortcut", self.shortcut_field.value()))
-        if sys.platform == "darwin" and shortcut.lower() == "ctrl+g":
-            shortcut = "Meta+G"
+        if sys.platform == "darwin" and shortcut.lower() == "meta+g":
+            shortcut = "Ctrl+G"
         self.shortcut_field.set_shortcut(shortcut)
 
     def _gather_config(self) -> Dict[str, Any]:
@@ -3337,7 +3349,7 @@ class ProgressBarConfigDialog(QDialog):
         for key in addon_config.LEGACY_SETTING_KEYS:
             updated_config.pop(key, None)
         updated_config["progress_bar_enabled"] = self.progress_bar_enabled_cb.isChecked()
-        updated_config["display_location"] = self.display_location_combo.currentData() or "review_and_home"
+        updated_config["display_location"] = self.display_location_combo.currentData() or "review"
         updated_config["show_super_mature_retention"] = self.show_smtr_cb.isChecked()
         updated_config["mode"] = self.mode_combo.currentData() or "stats"
         updated_config["dock_area"] = self.dock_area_combo.currentData() or "top"
@@ -3404,43 +3416,6 @@ def _reload_configuration_action() -> None:
     tooltip("Progress Bar configuration reloaded.", parent=mw, period=2000)
 
 
-def _is_anki_20() -> bool:
-    try:
-        parts = [int(p) for p in anki_version.split(".")[:2]]
-        major = parts[0] if len(parts) > 0 else 0
-        minor = parts[1] if len(parts) > 1 else 0
-        return (major, minor) < (2, 1)
-    except Exception:
-        return False
-
-if _is_anki_20():
-    """Workaround for QSS issue in EditCurrent,
-    only necessary on Anki 2.0.x"""
-
-    from aqt.editcurrent import EditCurrent
-
-
-    def changeStylesheet(*args):
-        mw.setStyleSheet('''
-            QMainWindow::separator
-        {
-            width: 0px;
-            height: 0px;
-        }
-        ''')
-
-
-    def restoreStylesheet(*args):
-        mw.setStyleSheet("")
-
-
-    EditCurrent.__init__ = wrap(
-        EditCurrent.__init__, restoreStylesheet, "after")
-    EditCurrent.onReset = wrap(
-        EditCurrent.onReset, changeStylesheet, "after")
-    EditCurrent.onSave = wrap(
-        EditCurrent.onSave, changeStylesheet, "afterwards")
-    
 # Define a function to toggle the visibility of the progress bar
 def toggleProgressBar():
     global settings
@@ -3453,7 +3428,7 @@ def toggleProgressBar():
     config = settings.raw_config
 
     if progress_bar_enabled:
-        if _should_show_progress_bar_for_state(_current_main_window_state) and progress_ui.progressBar is None:
+        if _should_show_progress_bar_for_state(_progress_state.main_window_state) and progress_ui.progressBar is None:
             initPB()
         if progress_ui.progressBar is not None:
             progress_ui.progressBar.show()
@@ -3465,10 +3440,5 @@ def toggleProgressBar():
     else:
         _remove_progress_bar()
 
-settings_action = QAction("Progress Bar Settings", mw)
-settings_action.triggered.connect(_open_config_dialog)
-
 progress_ui.update_toggle_shortcut(toggleProgressBar)
-tools_menu = getattr(getattr(mw, "form", None), "menuTools", None)
-if tools_menu is not None and hasattr(tools_menu, "addAction"):
-    tools_menu.addAction(settings_action)
+_install_settings_menu_action()

@@ -26,6 +26,8 @@ def pyqtSignal(*_args, **_kwargs):
 class GuiHooks:
     def __init__(self) -> None:
         self.main_window_did_init = HookList()
+        self.state_did_change = HookList()
+        self.reviewer_did_show_question = HookList()
         self.profile_did_open = HookList()
         self.profile_will_close = HookList()
 
@@ -391,6 +393,7 @@ class QAction(QWidget):
         super().__init__()
         self.text = text
         self._shortcut = QKeySequence("")
+        self._menu: Optional["QMenu"] = None
         self.triggered = HookList()
 
     def shortcut(self) -> "QKeySequence":
@@ -398,6 +401,39 @@ class QAction(QWidget):
 
     def setShortcut(self, sequence: "QKeySequence") -> None:
         self._shortcut = sequence
+
+    def menu(self) -> Optional["QMenu"]:
+        return self._menu
+
+
+class QMenu(QWidget):
+    def __init__(self, title: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._title = title
+        self.actions: List[QAction] = []
+        self.submenus: List["QMenu"] = []
+
+    def title(self) -> str:
+        return self._title
+
+    def addAction(self, action_or_text: Any) -> QAction:
+        if isinstance(action_or_text, QAction):
+            action = action_or_text
+        else:
+            action = QAction(str(action_or_text), self)
+        self.actions.append(action)
+        return action
+
+    def addMenu(self, menu_or_title: Any) -> "QMenu":
+        if isinstance(menu_or_title, QMenu):
+            submenu = menu_or_title
+        else:
+            submenu = QMenu(str(menu_or_title), self)
+        action = QAction(submenu.title(), self)
+        action._menu = submenu
+        self.actions.append(action)
+        self.submenus.append(submenu)
+        return submenu
 
 
 class QDockWidget(QWidget):
@@ -1258,12 +1294,9 @@ class AddonManagerStub:
         return dict(self.config)
 
 
-class MenuToolsStub:
+class MenuToolsStub(QMenu):
     def __init__(self) -> None:
-        self.actions: List[QAction] = []
-
-    def addAction(self, action: QAction) -> None:
-        self.actions.append(action)
+        super().__init__("Tools")
 
 
 class ProfileManagerStub:
@@ -1296,7 +1329,7 @@ class MainWindowStub(QWidget):
         self.addonManager = AddonManagerStub(config)
         self.col = CollectionStub()
         self.pm = ProfileManagerStub()
-        self.form = types.SimpleNamespace(menuTools=MenuToolsStub())
+        self.form = types.SimpleNamespace(menuTools=MenuToolsStub(), menubar=QMenu("Menu Bar"))
         self.web = types.SimpleNamespace(setFocus=lambda: None)
         self.docks: List[QDockWidget] = []
         self.dock_areas: Dict[QDockWidget, int] = {}
@@ -1414,6 +1447,7 @@ def install_stubs(config: Optional[Dict[str, Any]] = None) -> MainWindowStub:
             "QStyle": QStyle,
             "QRect": QRect,
             "QAction": QAction,
+            "QMenu": QMenu,
             "QObject": QObject,
             "QEvent": QEvent,
             "QHelpEvent": QHelpEvent,

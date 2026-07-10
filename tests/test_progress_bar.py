@@ -12,6 +12,66 @@ from typing import Any, List, Sequence, Tuple
 from tests.stubs import QApplication, DeckNode, QFileDialog, QPainter, QPalette, QRect
 
 
+def test_progress_state_reset_is_profile_scoped():
+    from addon.progress.state import ProgressState
+
+    state = ProgressState()
+    state.remaining[1] = 3.0
+    state.completed[1] = 2.0
+    state.latest_breakdown_rows = [{"name": "Deck"}]
+    state.progress_restored = True
+    state.main_window_state = "review"
+
+    state.reset_for_profile()
+
+    assert state.remaining == {}
+    assert state.completed == {}
+    assert state.latest_breakdown_rows == []
+    assert state.progress_restored is False
+    assert state.main_window_state == "profileManager"
+
+
+def test_hook_registration_supports_anki_generated_hook_objects():
+    from addon.progress.lifecycle import register_once, unregister
+
+    class GeneratedHook:
+        def __init__(self) -> None:
+            self._hooks = []
+
+        def append(self, callback):
+            self._hooks.append(callback)
+
+        def remove(self, callback):
+            self._hooks.remove(callback)
+
+    hook = GeneratedHook()
+
+    def first_callback():
+        pass
+
+    def replacement_callback():
+        pass
+
+    register_once(hook, first_callback, "main_window_did_init")
+    register_once(hook, replacement_callback, "main_window_did_init")
+
+    assert hook._hooks == [first_callback]
+
+    unregister(hook, "main_window_did_init")
+
+    assert hook._hooks == []
+
+
+def test_font_measurement_handles_unicode_and_uses_qt_advance():
+    from addon.ui.metrics import horizontal_advance
+
+    class Metrics:
+        def horizontalAdvance(self, text):
+            return len(text.encode("utf-8"))
+
+    assert horizontal_advance(Metrics(), "漢字 🧠") == len("漢字 🧠".encode("utf-8"))
+
+
 def _hex_to_rgb(color: str) -> Tuple[float, float, float]:
     assert color.startswith("#") and len(color) == 7
     return tuple(int(color[index : index + 2], 16) / 255 for index in (1, 3, 5))  # type: ignore[return-value]
@@ -129,6 +189,26 @@ def setup_progress_update(mod, config=None) -> None:
     mod.updatePB()
 
 
+def setup_progress_update_with_history(
+    mod,
+    *,
+    today_stats: Tuple[int, int, int, int, int, int, int],
+    history_records: List[dict],
+    config=None,
+    done: int = 0,
+    remain: int = 8,
+) -> None:
+    mod._apply_config(config or {"mode": "time_left", "display_location": "review_and_home"})
+    mod.mw.pm.profile[mod.HISTORY_PROGRESS_KEY] = list(history_records)
+    mod.mw.col.db = SequenceDB(first_rows=[today_stats, None, today_stats])
+    mod.mw.col.sched._deck_tree = DeckNode(0, [DeckNode(1)])
+    mod.mw.col.sched.day_cutoff = 10 * 86400
+    mod.mw.col.decks.current = lambda: {"id": 1}
+    seed_progress_counts(mod, done=done, remain=remain)
+    mod.initPB()
+    mod.updatePB()
+
+
 def test_config_coercion_and_normalization(addon_module):
     mod = addon_module
 
@@ -156,7 +236,7 @@ def test_config_coercion_and_normalization(addon_module):
     assert mod.settings.mode == "stats"
     assert mod.settings.use_system_timezone is False
     assert mod.settings.tz == -3
-    assert mod.settings.display_location == "review_and_home"
+    assert mod.settings.display_location == "review"
     assert "time_warning_minutes" not in mod.settings.raw_config
 
 
@@ -200,10 +280,21 @@ def test_settings_cancel_and_apply_have_standard_persistence_semantics(addon_mod
     assert mod.mw.addonManager.config["mode"] == "stats"
 
     applied = mod.ProgressBarConfigDialog(mod.mw)
-    applied.mode_combo.setCurrentIndex(applied.mode_combo.findData("time_left"))
+    applied.mode_combo.setCurrentIndex(applied.mode_combo.findData("simple"))
     applied._apply_without_closing()
     applied.reject()
-    assert mod.mw.addonManager.config["mode"] == "time_left"
+    assert mod.mw.addonManager.config["mode"] == "simple"
+
+
+def test_settings_dialog_maps_legacy_time_left_to_advanced(addon_module):
+    mod = addon_module
+    mod._apply_config({"mode": "time_left"})
+
+    dialog = mod.ProgressBarConfigDialog(mod.mw)
+
+    assert dialog.mode_combo.currentData() == "stats"
+    dialog._apply_without_closing()
+    assert mod.mw.addonManager.config["mode"] == "stats"
 
 
 def test_mode_and_theme_validation(mw):
@@ -226,14 +317,14 @@ def test_mode_and_theme_validation(mw):
     assert addon_config.settings.active_theme.background == "#222222"
 
 
-def test_display_location_validation_defaults_to_review_and_home(mw):
+def test_display_location_validation_defaults_to_review(mw):
     from addon import config as addon_config
 
     addon_config.apply_config(mw, {"display_location": "home"})
 
-    assert addon_config.settings.display_location == "review_and_home"
-    assert addon_config.settings.raw_config["display_location"] == "review_and_home"
-    assert "display_location 'home' invalid; using review_and_home." in addon_config.validation_errors
+    assert addon_config.settings.display_location == "review"
+    assert addon_config.settings.raw_config["display_location"] == "review"
+    assert "display_location 'home' invalid; using review." in addon_config.validation_errors
 
 
 def test_config_persistence_uses_packaged_addon_id(mw):
@@ -296,13 +387,13 @@ def test_settings_dialog_saves_display_location(addon_module):
     mod = addon_module
 
     dialog = mod.ProgressBarConfigDialog(mod.mw)
-    assert dialog.display_location_combo.currentData() == "review_and_home"
+    assert dialog.display_location_combo.currentData() == "review"
 
-    dialog.display_location_combo.setCurrentIndex(dialog.display_location_combo.findData("review"))
+    dialog.display_location_combo.setCurrentIndex(dialog.display_location_combo.findData("review_and_home"))
     dialog._save_and_close()
 
     assert dialog._accepted is True
-    assert mod.mw.addonManager.config["display_location"] == "review"
+    assert mod.mw.addonManager.config["display_location"] == "review_and_home"
 
 
 def test_theme_resolution_controls_bar_and_dialog_palettes(addon_module):
@@ -688,33 +779,61 @@ def test_completed_counts_use_historical_answer_state_and_original_deck(addon_mo
 def test_queue_counts_respect_limits_and_exclude_suspended_and_buried(addon_module):
     mod = addon_module
     db = SQLiteDB()
-    db.execute("create table cards (id integer primary key, did integer, odid integer, type integer, queue integer)")
+    db.execute("create table cards (id integer primary key, did integer, odid integer, type integer, queue integer, due integer)")
     rows = [
-        (1, 1, 0, 2, 2),
-        (2, 1, 0, 2, 2),
-        (3, 1, 0, 2, -1),
-        (4, 1, 0, 2, -2),
-        (5, 1, 0, 3, 1),
-        (6, 1, 0, 0, 0),
-        (7, 1, 0, 0, -3),
+        (1, 1, 0, 2, 2, 1),
+        (2, 1, 0, 2, 2, 1),
+        (3, 1, 0, 2, -1, 1),
+        (4, 1, 0, 2, -2, 1),
+        (5, 1, 0, 3, 1, 1),
+        (6, 1, 0, 0, 0, 1),
+        (7, 1, 0, 0, -3, 1),
     ]
     for row in rows:
-        db.execute("insert into cards values (?, ?, ?, ?, ?)", row)
+        db.execute("insert into cards values (?, ?, ?, ?, ?, ?)", row)
     mod.mw.col.db = db
     node = DeckNode(1)
     node.review_count = 1
     node.learn_count = 1
     node.new_count = 2
+    mod.mw.col.sched.day_cutoff = 86400
 
     assert mod._queue_counts_for_node(node) == (1, 1, 1, 1, 0, 1)
+
+
+def test_buried_counter_excludes_cards_not_due_until_after_today(addon_module):
+    mod = addon_module
+    db = SQLiteDB()
+    db.execute("create table cards (id integer primary key, did integer, odid integer, type integer, queue integer, due integer)")
+    rows = [
+        (1, 1, 0, 2, -2, 23147),       # overdue review
+        (2, 1, 0, 2, -2, 23148),       # review due today
+        (3, 1, 0, 2, -2, 23149),       # future review
+        (4, 1, 0, 1, -3, 1999999000),  # intraday learning due before cutoff
+        (5, 1, 0, 1, -3, 2000001000),  # intraday learning due tomorrow
+        (6, 1, 0, 3, -3, 23148),       # day-learning due today
+        (7, 1, 0, 3, -3, 23149),       # day-learning due tomorrow
+        (8, 1, 0, 0, -2, 1),       # new cards use scheduler eligibility
+    ]
+    for row in rows:
+        db.execute("insert into cards values (?, ?, ?, ?, ?, ?)", row)
+    mod.mw.col.db = db
+    mod.mw.col.sched.day_cutoff = 2000000000
+
+    node = DeckNode(1)
+    node.review_count = 3
+    node.learn_count = 3
+    node.new_count = 1
+
+    assert mod._queue_counts_for_node(node) == (0, 0, 0, 2, 2, 1)
 
 
 def test_nested_deck_counts_are_aggregated_once_at_the_selected_root(addon_module):
     mod = addon_module
     db = SQLiteDB()
-    db.execute("create table cards (id integer primary key, did integer, odid integer, type integer, queue integer)")
-    for row in ((1, 1, 0, 2, 2), (2, 2, 0, 2, 2), (3, 2, 0, 2, 2)):
-        db.execute("insert into cards values (?, ?, ?, ?, ?)", row)
+    db.execute("create table cards (id integer primary key, did integer, odid integer, type integer, queue integer, due integer)")
+    for row in ((1, 1, 0, 2, 2, 0), (2, 2, 0, 2, 2, 0), (3, 2, 0, 2, 2, 0)):
+        db.execute("insert into cards values (?, ?, ?, ?, ?, ?)", row)
     mod.mw.col.db = db
     child = DeckNode(2)
     child.review_count = 2
@@ -791,6 +910,113 @@ def test_progress_modes_change_visible_label(addon_module):
     assert (" " + "T" + "R") not in stats_label
 
 
+def test_eta_uses_history_before_any_cards_today(addon_module):
+    mod = addon_module
+
+    setup_progress_update_with_history(
+        mod,
+        today_stats=(0, 0, 0, 0, 0, 0, 0),
+        history_records=[
+            {"day": 10, "cards": 100, "avg_seconds": 999.0},
+            {"day": 9, "cards": 10, "avg_seconds": 12.0},
+            {"day": 8, "cards": 5, "avg_seconds": 6.0},
+        ],
+    )
+
+    assert round(mod._last_cards_per_minute, 3) == 6.0
+    assert "ETA " in mod.progressBar.format()
+    assert "ETA N/A" not in mod.progressBar.format()
+    assert "previous averages" in mod.progressBar.toolTip()
+    assert mod._latest_breakdown_rows[0]["eta"] != "N/A"
+
+
+def test_eta_uses_history_until_five_cards_today(addon_module):
+    mod = addon_module
+
+    setup_progress_update_with_history(
+        mod,
+        today_stats=(4, 0, 0, 4, 0, 0, 400),
+        history_records=[{"day": 9, "cards": 10, "avg_seconds": 10.0}],
+    )
+
+    assert round(mod._last_cards_per_minute, 3) == 6.0
+    assert "previous averages" in mod.progressBar.toolTip()
+
+
+def test_eta_uses_today_pace_after_five_cards(addon_module):
+    mod = addon_module
+
+    setup_progress_update_with_history(
+        mod,
+        today_stats=(5, 0, 0, 5, 0, 0, 100),
+        history_records=[{"day": 9, "cards": 10, "avg_seconds": 10.0}],
+    )
+
+    assert round(mod._last_cards_per_minute, 3) == 3.0
+    assert "today's pace" in mod.progressBar.toolTip()
+
+
+def test_eta_stays_unavailable_without_usable_history_before_threshold(addon_module):
+    mod = addon_module
+
+    setup_progress_update_with_history(
+        mod,
+        today_stats=(4, 0, 0, 4, 0, 0, 80),
+        history_records=[
+            {"day": 9, "cards": 0, "avg_seconds": 10.0},
+            {"day": 8, "cards": 10, "avg_seconds": 0.0},
+        ],
+    )
+
+    assert mod._last_cards_per_minute is None
+    assert "ETA N/A" in mod.progressBar.format()
+    assert "enough review history" in mod.progressBar.toolTip()
+    assert mod._latest_breakdown_rows[0]["eta"] == "N/A"
+
+
+def test_simple_home_bar_does_not_show_seeded_eta(addon_module):
+    mod = addon_module
+
+    setup_progress_update_with_history(
+        mod,
+        today_stats=(0, 0, 0, 0, 0, 0, 0),
+        history_records=[{"day": 9, "cards": 10, "avg_seconds": 10.0}],
+        config={"mode": "simple", "display_location": "review_and_home"},
+    )
+
+    assert mod._last_cards_per_minute is not None
+    assert "ETA" not in mod.progressBar.format()
+
+
+def test_stats_zero_done_keeps_full_label_when_initial_width_is_unrealized(addon_module):
+    mod = addon_module
+
+    class Metrics:
+        def horizontalAdvance(self, text):
+            return len(text) * 10
+
+    today_stats = (0, 0, 0, 0, 0, 0, 0)
+    setup_progress_update_with_history(
+        mod,
+        today_stats=today_stats,
+        history_records=[{"day": 9, "cards": 10, "avg_seconds": 10.0}],
+        config={"mode": "stats", "display_location": "review_and_home"},
+    )
+    mod.mw.resize(3000, 900)
+    mod.progressBar.resize(80, 20)
+    mod.progressBar.fontMetrics = lambda: Metrics()
+    mod.mw.col.db = SequenceDB(first_rows=[today_stats, None, today_stats])
+
+    mod.updatePB()
+
+    label = mod.progressBar.format()
+    assert "done" in label
+    assert "Again" in label
+    assert "Retention" in label
+    assert "ETA " in label
+    assert not label.startswith("0/8")
+
+
 def test_progress_label_falls_back_to_compact_and_minimal_text(addon_module):
     mod = addon_module
 
@@ -817,6 +1043,31 @@ def test_progress_label_falls_back_to_compact_and_minimal_text(addon_module):
     mod.progress_ui.progressBar = Bar(120)
     assert mod._fit_progress_bar_format(full, compact, minimal) == minimal
     mod.progress_ui.progressBar = Bar(500)
+    assert mod._fit_progress_bar_format(full, compact, minimal) == full
+
+
+def test_initial_advanced_label_uses_main_window_width_when_bar_width_is_stale(addon_module):
+    mod = addon_module
+
+    class Metrics:
+        def horizontalAdvance(self, text):
+            return len(text) * 10
+
+    class Bar:
+        def width(self):
+            return 500
+
+        def fontMetrics(self):
+            return Metrics()
+
+    full = "18 (7.89%) done  |  210 (92.11%) left  |  19.94 (16.52) s/card  |  16.67% Again  |  86.67% Retention"
+    compact = "18/228 (8%)  |  210 left  |  ETA 11:00 AM"
+    minimal = "18/228  |  210 left"
+
+    mod._apply_config({"mode": "stats", "dock_area": "top"})
+    mod.mw.resize(1600, 900)
+    mod.progress_ui.progressBar = Bar()
+
     assert mod._fit_progress_bar_format(full, compact, minimal) == full
 
 
@@ -1001,15 +1252,15 @@ def _prepare_state_change_counts(mod) -> None:
     mod.mw.col.decks.current = lambda: {"id": 1}
 
 
-def test_display_location_default_shows_on_deck_browser(addon_module):
+def test_display_location_default_hides_on_deck_browser(addon_module):
     mod = addon_module
     _prepare_state_change_counts(mod)
 
     mod._apply_config({})
     mod.afterStateChangeCallBack("deckBrowser", "review")
 
-    assert mod.settings.display_location == "review_and_home"
-    assert mod.progressBar is not None
+    assert mod.settings.display_location == "review"
+    assert mod.progressBar is None
     assert mod.currDID is None
 
 
@@ -1027,6 +1278,19 @@ def test_display_location_review_only_hides_on_deck_browser(addon_module):
     assert mod.currDID is None
 
 
+def test_display_location_review_only_hides_on_overview(addon_module):
+    mod = addon_module
+    _prepare_state_change_counts(mod)
+
+    mod._apply_config({"display_location": "review"})
+    mod.initPB()
+    assert mod.progressBar is not None
+
+    mod.afterStateChangeCallBack("overview", "deckBrowser")
+
+    assert mod.progressBar is None
+
+
 def test_display_location_review_only_shows_on_review(addon_module):
     mod = addon_module
     _prepare_state_change_counts(mod)
@@ -1039,6 +1303,32 @@ def test_display_location_review_only_shows_on_review(addon_module):
 
     assert mod.progressBar is not None
     assert mod.currDID == 1
+
+
+def test_display_location_review_and_home_shows_on_overview(addon_module):
+    mod = addon_module
+    _prepare_state_change_counts(mod)
+
+    mod._apply_config({"display_location": "review_and_home"})
+    mod.afterStateChangeCallBack("overview", "deckBrowser")
+
+    assert mod.progressBar is not None
+    assert mod.currDID == 1
+
+
+def test_display_location_apply_review_only_removes_existing_overview_bar(addon_module):
+    mod = addon_module
+    _prepare_state_change_counts(mod)
+
+    mod._apply_config({"display_location": "review_and_home"})
+    mod.afterStateChangeCallBack("overview", "deckBrowser")
+    assert mod.progressBar is not None
+
+    mod.mw.col.db = SequenceDB(first_rows=[(0, 0, 0, 0, 0, 0)])
+    mod.addon_config.apply_config(mod.mw, {"display_location": "review"})
+    mod._apply_settings(show_messages=False)
+
+    assert mod.progressBar is None
 
 
 def test_progress_bar_disabled_removes_for_any_display_location(addon_module):
@@ -1071,6 +1361,7 @@ def test_settings_dialog_is_lightweight(addon_module):
     assert dialog._footer.objectName() == "settingsFooter"
     assert dialog._save_btn.objectName() == "primaryButton"
     assert dialog._donate_btn._width == 98
+    assert dialog.mode_combo._items == [("Simple", "simple"), ("Advanced", "stats")]
     for control in (
         dialog.display_location_combo,
         dialog.mode_combo,
@@ -1080,7 +1371,7 @@ def test_settings_dialog_is_lightweight(addon_module):
         dialog.shortcut_field,
     ):
         assert control._width == 200
-    assert dialog.display_location_combo.currentData() == "review_and_home"
+    assert dialog.display_location_combo.currentData() == "review"
     assert dialog.mode_combo.currentData() == "stats"
     assert dialog.dock_area_combo.currentData() == "top"
     assert dialog.theme_combo.currentData() == "auto"
@@ -1123,40 +1414,72 @@ def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
     assert manifest["package"] == "1511983907"
     assert manifest["min_point_version"] == 49
     assert manifest["max_point_version"] == 260500
-    assert manifest["human_version"] == "1.1.0"
+    assert manifest["human_version"] == "1.1.1"
 
 
-def test_minimum_advertised_anki_version_uses_supported_code_path(addon_module, monkeypatch):
-    mod = addon_module
-    monkeypatch.setattr(mod, "anki_version", "2.1.49")
-
-    assert mod._is_anki_20() is False
-
-
-def test_tools_menu_only_exposes_progress_bar_settings(addon_module):
+def test_minimum_advertised_anki_version_uses_modern_gui_hooks(addon_module):
     mod = addon_module
 
-    assert [action.text for action in mod.mw.form.menuTools.actions] == ["Progress Bar Settings"]
+    assert "addHook(" not in Path(mod.__file__).read_text(encoding="utf-8")
+    assert mod._on_state_did_change in mod.gui_hooks.state_did_change
+    assert mod._on_reviewer_did_show_question in mod.gui_hooks.reviewer_did_show_question
 
 
-def test_legacy_ctrl_shortcut_is_normalized_on_macos(mw, monkeypatch):
+def test_menu_bar_exposes_progress_bar_settings_under_caleb_addons(addon_module):
+    mod = addon_module
+
+    tools_menu = mod.mw.form.menuTools
+    menu_bar = mod.mw.form.menubar
+
+    assert tools_menu.actions == []
+    assert tools_menu.submenus == []
+    assert [action.text for action in menu_bar.actions] == ["Caleb M. Add-ons Settings"]
+    assert len(menu_bar.submenus) == 1
+    submenu = menu_bar.submenus[0]
+    assert submenu.title() == "Caleb M. Add-ons Settings"
+    assert submenu.objectName() == "caleb_m_addons_menu"
+    assert [action.text for action in submenu.actions] == ["Progress Bar settings"]
+
+    mod._install_settings_menu_action()
+
+    assert tools_menu.actions == []
+    assert len(menu_bar.submenus) == 1
+    assert [action.text for action in submenu.actions] == ["Progress Bar settings"]
+
+
+def test_progress_bar_settings_reuses_existing_caleb_addons_menu(addon_module):
+    mod = addon_module
+    first_menu_bar = mod.mw.form.menubar
+    first_submenu = first_menu_bar.submenus[0]
+
+    delattr(mod.mw, "_progress_bar_settings_action")
+    delattr(mod.mw, "_caleb_m_addons_menu")
+
+    mod._install_settings_menu_action()
+
+    assert len(first_menu_bar.submenus) == 1
+    assert first_menu_bar.submenus[0] is first_submenu
+    assert [action.text for action in first_submenu.actions] == ["Progress Bar settings"]
+
+
+def test_legacy_meta_shortcut_is_normalized_on_macos(mw, monkeypatch):
     from addon import config as addon_config
 
     monkeypatch.setattr(addon_config.sys, "platform", "darwin")
-    addon_config.apply_config(mw, {"toggle_shortcut": "Ctrl+G"})
+    addon_config.apply_config(mw, {"toggle_shortcut": "Meta+G"})
 
-    assert addon_config.settings.toggle_shortcut == "Meta+G"
-    assert addon_config.settings.raw_config["toggle_shortcut"] == "Meta+G"
+    assert addon_config.settings.toggle_shortcut == "Ctrl+G"
+    assert addon_config.settings.raw_config["toggle_shortcut"] == "Ctrl+G"
     assert addon_config.validation_errors == []
 
 
-def test_legacy_ctrl_shortcut_does_not_show_startup_tooltip(monkeypatch):
+def test_legacy_meta_shortcut_does_not_show_startup_tooltip(monkeypatch):
     import importlib
     import sys
 
     from tests.stubs import install_stubs
 
-    install_stubs({"toggle_shortcut": "Ctrl+G"})
+    install_stubs({"toggle_shortcut": "Meta+G"})
     for name in [
         "addon.reviewer_progress_bar",
         "addon.config",
@@ -1170,7 +1493,7 @@ def test_legacy_ctrl_shortcut_does_not_show_startup_tooltip(monkeypatch):
     monkeypatch.setattr(addon_config.sys, "platform", "darwin")
     mod = importlib.import_module("addon.reviewer_progress_bar")
 
-    assert mod.settings.toggle_shortcut == "Meta+G"
+    assert mod.settings.toggle_shortcut == "Ctrl+G"
     assert not hasattr(mod.mw, "_last_tooltip")
 
 

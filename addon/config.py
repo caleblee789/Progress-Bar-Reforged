@@ -337,10 +337,10 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         return value
 
     progress_bar_enabled = _bool("progress_bar_enabled", True)
-    display_location = str(config_data.get("display_location", "review_and_home")).strip().lower()
+    display_location = str(config_data.get("display_location", "review")).strip().lower()
     if display_location not in {"review", "review_and_home"}:
-        errors.append(f"display_location {display_location!r} invalid; using review_and_home.")
-        display_location = "review_and_home"
+        errors.append(f"display_location {display_location!r} invalid; using review.")
+        display_location = "review"
     normalized["display_location"] = display_location
 
     mode = str(config_data.get("mode", "stats")).strip().lower()
@@ -453,10 +453,12 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
             progress_bar_style = ""
             normalized["progress_bar_style"] = ""
 
-    default_shortcut = "Meta+G" if sys.platform == "darwin" else "Ctrl+G"
+    # Qt maps Ctrl to the Command key on macOS.  Meta maps to the physical
+    # Control key there, so keep the portable form as the public default.
+    default_shortcut = "Ctrl+G"
     toggle_shortcut = str(config_data.get("toggle_shortcut", default_shortcut)).strip() or default_shortcut
-    if sys.platform == "darwin" and toggle_shortcut.lower() == "ctrl+g":
-        toggle_shortcut = "Meta+G"
+    if sys.platform == "darwin" and toggle_shortcut.lower() == "meta+g":
+        toggle_shortcut = "Ctrl+G"
     normalized["toggle_shortcut"] = toggle_shortcut
 
     lrn_steps = _int("lrn_steps", 2, minimum=1)

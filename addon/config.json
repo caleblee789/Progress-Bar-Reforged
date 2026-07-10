@@ -1,10 +1,10 @@
 {
     "progress_bar_enabled": true,
-    "display_location": "review_and_home",
+    "display_location": "review",
     "mode": "stats",
     "dock_area": "top",
     "theme": "auto",
-    "toggle_shortcut": "Meta+G",
+    "toggle_shortcut": "Ctrl+G",
     "appearance": {
         "day": {
             "text": "#111827",
