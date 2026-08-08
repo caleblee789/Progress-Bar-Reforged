@@ -567,9 +567,25 @@ def _done_counts_by_deck_since(cutoff: int) -> Dict[int, Tuple[int, int, int]]:
     return progress_scheduler.completed_counts_by_deck(mw.col.db, cutoff)
 
 
-def _queue_counts_for_node(node) -> Tuple[int, int, int, int, int, int]:
+def _queue_counts_for_node(
+    node, active_queue_counts: Optional[Tuple[int, int, int]] = None
+) -> Tuple[int, int, int, int, int, int]:
     return progress_scheduler.queue_counts_for_node(
-        mw.col.db, mw.col.sched, node, _collect_deck_ids
+        mw.col.db, mw.col.sched, node, _collect_deck_ids, active_queue_counts
+    )
+
+
+def _current_reviewer_queue_counts() -> Optional[Tuple[int, int, int]]:
+    """Read the same scheduler snapshot used by Anki's visible card counter."""
+
+    if _current_main_window_state != "review":
+        return None
+    reviewer = getattr(mw, "reviewer", None)
+    if getattr(reviewer, "state", None) not in {"question", "answer"}:
+        return None
+    card_info = getattr(reviewer, "_v3", None)
+    return progress_scheduler.queued_cards_counts(
+        getattr(card_info, "queued_cards", None)
     )
 
 
@@ -1271,9 +1287,13 @@ def updatePB():
         _format_breakdown("To Review", actionable_rev_total, buried_rev_total),
     ]
     tooltip_lines.extend(breakdown_lines)
-    tooltip_lines.append("Due today excludes buried cards (shown as +).")
+    tooltip_lines.append(
+        "Cards left matches Anki's active reviewer queue; + shows cards already buried or hidden by sibling burying."
+    )
     remaining_tooltip_lines.extend(breakdown_lines)
-    remaining_tooltip_lines.append("Due today excludes buried cards (shown as +).")
+    remaining_tooltip_lines.append(
+        "Cards left matches Anki's active reviewer queue; + shows cards already buried or hidden by sibling burying."
+    )
 
     warning_summary_text: Optional[str] = None
     if settings.warnings_enabled or settings.pace_warnings_enabled:
@@ -1396,12 +1416,25 @@ def updateCountsForAllDecks(updateTotal: bool) -> None:
 
     today_cutoff = (mw.col.sched.day_cutoff - 86400) * 1000
     done_by_deck = _done_counts_by_deck_since(today_cutoff)
+    active_queue_counts = _current_reviewer_queue_counts()
 
     for node in mw.col.sched.deck_due_tree().children:
-        updateCountsForTree(node, updateTotal, done_by_deck)
+        updateCountsForTree(
+            node,
+            updateTotal,
+            done_by_deck,
+            active_deck_id=currDID,
+            active_queue_counts=active_queue_counts,
+        )
 
 
-def updateCountsForTree(node, updateTotal: bool, done_by_deck: Dict[int, Tuple[int, int, int]]) -> None:
+def updateCountsForTree(
+    node,
+    updateTotal: bool,
+    done_by_deck: Dict[int, Tuple[int, int, int]],
+    active_deck_id: Optional[int] = None,
+    active_queue_counts: Optional[Tuple[int, int, int]] = None,
+) -> None:
     did = node.deck_id
     (
         rev_count,
@@ -1410,7 +1443,9 @@ def updateCountsForTree(node, updateTotal: bool, done_by_deck: Dict[int, Tuple[i
         buried_rev,
         buried_lrn,
         buried_new,
-    ) = _queue_counts_for_node(node)
+    ) = _queue_counts_for_node(
+        node, active_queue_counts if did == active_deck_id else None
+    )
 
     rev_done = 0
     lrn_done = 0
@@ -1434,7 +1469,13 @@ def updateCountsForTree(node, updateTotal: bool, done_by_deck: Dict[int, Tuple[i
     updateCountsForDeck(did, remain, raw_remain, rev_done, lrn_done, new_done, updateTotal)
 
     for child in node.children:
-        updateCountsForTree(child, updateTotal, done_by_deck)
+        updateCountsForTree(
+            child,
+            updateTotal,
+            done_by_deck,
+            active_deck_id=active_deck_id,
+            active_queue_counts=active_queue_counts,
+        )
 
 
 def updateCountsForDeck(
@@ -2061,7 +2102,8 @@ class ShortcutField(QWidget):
 
 
 BREAKDOWN_INFO_TEXT = (
-    "Due today counts exclude buried siblings. Buried cards due today are listed separately. "
+    "In review, due today matches Anki's active card queue and excludes cards hidden by "
+    "sibling burying. Buried includes cards already buried plus due siblings Anki will hide. "
     "ETAs use today's pace after 5 cards or previous averages before then."
 )
 _ETA_SORT_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*([AP]M)(?:\+(\d+))?$", re.IGNORECASE)

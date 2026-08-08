@@ -17,7 +17,7 @@ What's new in v1.1.1
 Features
 --------
 
-* **Live reviewer progress** - choose Simple or Advanced mode to control how much progress detail appears while reviewing.
+* **Live reviewer progress** - choose Simple or Advanced mode to control how much progress detail appears while reviewing. In review, Cards left matches Anki's active reviewer queue; cards already buried or hidden by sibling burying appear in the buried breakdown.
 * **Current-deck counting** - track active New/Learning/Review work, completed cards, percentage done, speed, time spent, time left, and ETA.
 * **Deck breakdown dialog** - click the bar to inspect per-deck actionable and buried counts for New/Learning/Review cards, with ETAs once today's pace is known.
 * **Retention metrics** - Advanced mode shows Again rate, Retention, optional super-mature retention, and yesterday comparisons.
