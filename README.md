@@ -3,7 +3,12 @@ Progress_Bar_Reforged for Anki
 
 Progress_Bar_Reforged adds a dockable progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
 
-Current release: **v1.1.1**. Install from AnkiWeb with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the GitHub release artifacts.
+Current release: **v1.1.2**. Install from AnkiWeb with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the GitHub release artifacts.
+
+What's new in v1.1.2
+--------------------
+
+* **Reviewer-queue accurate counts** - during review, Cards left now matches Anki's active reviewer queue after daily limits and sibling burying. The deck breakdown separately reports cards already buried and cards hidden by sibling burying.
 
 What's new in v1.1.1
 --------------------

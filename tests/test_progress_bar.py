@@ -1495,7 +1495,7 @@ def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
     assert manifest["package"] == "1511983907"
     assert manifest["min_point_version"] == 49
     assert manifest["max_point_version"] == 260500
-    assert manifest["human_version"] == "1.1.1"
+    assert manifest["human_version"] == "1.1.2"
 
 
 def test_minimum_advertised_anki_version_uses_modern_gui_hooks(addon_module):
