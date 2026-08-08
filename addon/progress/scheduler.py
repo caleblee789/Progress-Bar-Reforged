@@ -2,7 +2,68 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+
+QueueCounts = Tuple[int, int, int]
+
+
+def _normalized_counts(counts: Tuple[Any, Any, Any]) -> QueueCounts:
+    return tuple(max(0, int(value or 0)) for value in counts)  # type: ignore[return-value]
+
+
+def queued_cards_counts(queued_cards: Any) -> Optional[QueueCounts]:
+    """Return reviewer queue counts in review/learning/new order when available."""
+
+    if queued_cards is None:
+        return None
+    try:
+        return _normalized_counts(
+            (
+                queued_cards.review_count,
+                queued_cards.learning_count,
+                queued_cards.new_count,
+            )
+        )
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def reconcile_queue_counts(
+    deck_tree_counts: QueueCounts,
+    buried_counts: QueueCounts,
+    active_queue_counts: Optional[QueueCounts] = None,
+) -> Tuple[int, int, int, int, int, int]:
+    """Prefer Anki's built queue and surface siblings omitted from that queue.
+
+    The deck due tree applies daily limits, but it is populated before the queue
+    builder anticipates sibling burying.  ``QueuedCards`` is what Anki's own
+    reviewer counter displays.  Any category difference is work the queue
+    builder has hidden because of sibling-bury settings; add it to the already
+    buried database count instead of presenting it as work the user will see.
+    """
+
+    tree_rev, tree_lrn, tree_new = _normalized_counts(deck_tree_counts)
+    buried_rev, buried_lrn, buried_new = _normalized_counts(buried_counts)
+    if active_queue_counts is None:
+        return (
+            tree_rev,
+            tree_lrn,
+            tree_new,
+            buried_rev,
+            buried_lrn,
+            buried_new,
+        )
+
+    queue_rev, queue_lrn, queue_new = _normalized_counts(active_queue_counts)
+    return (
+        queue_rev,
+        queue_lrn,
+        queue_new,
+        buried_rev + max(0, tree_rev - queue_rev),
+        buried_lrn + max(0, tree_lrn - queue_lrn),
+        buried_new + max(0, tree_new - queue_new),
+    )
 
 
 def completed_counts_by_deck(db: Any, cutoff: int) -> Dict[int, Tuple[int, int, int]]:
@@ -24,16 +85,22 @@ def completed_counts_by_deck(db: Any, cutoff: int) -> Dict[int, Tuple[int, int, 
 
 
 def queue_counts_for_node(
-    db: Any, sched: Any, node: Any, collect_deck_ids: Callable[[Any], List[int]]
+    db: Any,
+    sched: Any,
+    node: Any,
+    collect_deck_ids: Callable[[Any], List[int]],
+    active_queue_counts: Optional[QueueCounts] = None,
 ) -> Tuple[int, int, int, int, int, int]:
-    """Return actionable and buried counts while respecting scheduler limits."""
+    """Return scheduler-authoritative actionable and separately buried counts."""
 
     deck_ids = list(dict.fromkeys(collect_deck_ids(node)))
     sched_rev = int(getattr(node, "review_count", 0) or 0)
     sched_lrn = int(getattr(node, "learn_count", 0) or 0)
     sched_new = int(getattr(node, "new_count", 0) or 0)
     if not deck_ids:
-        return sched_rev, sched_lrn, sched_new, 0, 0, 0
+        return reconcile_queue_counts(
+            (sched_rev, sched_lrn, sched_new), (0, 0, 0), active_queue_counts
+        )
 
     today = int(getattr(sched, "today", 0) or 0)
     day_cutoff = int(getattr(sched, "day_cutoff", 0) or 0)
@@ -42,24 +109,19 @@ def queue_counts_for_node(
     placeholders = ",".join(["?"] * len(deck_ids))
     counts = db.first(
         f"""
-        select sum(case when queue = 2 then 1 else 0 end),
-               sum(case when queue in (1, 3) then 1 else 0 end),
-               sum(case when queue = 0 then 1 else 0 end),
-               sum(case when queue in (-2, -3) and type = 2 and due <= ? then 1 else 0 end),
+        select sum(case when queue in (-2, -3) and type = 2 and due <= ? then 1 else 0 end),
                sum(case when queue in (-2, -3) and type in (1, 3)
                         and due <= case when due < 1000000000 then ? else ? end then 1 else 0 end),
                sum(case when queue in (-2, -3) and type = 0 then 1 else 0 end)
-        from cards where queue in (0, 1, 2, 3, -2, -3) and did in ({placeholders})
+        from cards where queue in (-2, -3) and did in ({placeholders})
         """,
         today, today, day_cutoff, *deck_ids,
-    ) or (0, 0, 0, 0, 0, 0)
-    raw_rev, raw_lrn, raw_new, buried_rev, buried_lrn, buried_new = (
-        int(value or 0) for value in counts
-    )
-    new_limit = max(0, sched_new - min(buried_new, max(0, sched_new - raw_new)))
-    return (
-        min(raw_rev, sched_rev), min(raw_lrn, sched_lrn), min(raw_new, new_limit),
-        buried_rev, buried_lrn, buried_new,
+    ) or (0, 0, 0)
+    buried_rev, buried_lrn, buried_new = _normalized_counts(counts)
+    return reconcile_queue_counts(
+        (sched_rev, sched_lrn, sched_new),
+        (buried_rev, buried_lrn, buried_new),
+        active_queue_counts,
     )
 
 

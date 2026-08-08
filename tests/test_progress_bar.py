@@ -739,9 +739,9 @@ def test_progress_bar_custom_colors_remain_authoritative(addon_module):
     }
 
 
-def test_queue_counts_for_node_caps_and_excludes_buried(addon_module):
+def test_queue_counts_for_node_uses_deck_tree_for_actionable_and_sql_for_buried(addon_module):
     mod = addon_module
-    mod.mw.col.db = SequenceDB(first_rows=[(10, 5, 2, 1, 2, 6)])
+    mod.mw.col.db = SequenceDB(first_rows=[(1, 2, 6)])
 
     child = DeckNode(2)
     node = DeckNode(1, [child])
@@ -749,7 +749,88 @@ def test_queue_counts_for_node_caps_and_excludes_buried(addon_module):
     node.learn_count = 3
     node.new_count = 4
 
-    assert mod._queue_counts_for_node(node) == (5, 3, 2, 1, 2, 6)
+    assert mod._queue_counts_for_node(node) == (5, 3, 4, 1, 2, 6)
+
+
+def test_queue_counts_match_active_reviewer_queue_and_move_hidden_siblings_to_buried(addon_module):
+    mod = addon_module
+    mod.mw.col.db = SequenceDB(first_rows=[(1, 0, 2)])
+
+    node = DeckNode(1)
+    node.review_count = 5
+    node.learn_count = 3
+    node.new_count = 4
+
+    assert mod._queue_counts_for_node(node, (3, 3, 1)) == (3, 3, 1, 3, 0, 5)
+
+
+def test_current_reviewer_queue_counts_use_ankis_visible_counter_snapshot(addon_module):
+    mod = addon_module
+    mod._current_main_window_state = "review"
+    mod.mw.reviewer = SimpleNamespace(
+        state="question",
+        _v3=SimpleNamespace(
+            queued_cards=SimpleNamespace(
+                new_count=7,
+                learning_count=4,
+                review_count=11,
+            )
+        ),
+    )
+
+    assert mod._current_reviewer_queue_counts() == (11, 4, 7)
+
+    mod.mw.reviewer.state = "transition"
+    assert mod._current_reviewer_queue_counts() is None
+
+
+def test_update_all_decks_reconciles_active_queue_and_buried_siblings(addon_module):
+    mod = addon_module
+    db = SQLiteDB()
+    db.execute(
+        "create table cards (id integer primary key, did integer, odid integer, "
+        "type integer, queue integer, due integer)"
+    )
+    db.execute(
+        "create table revlog (id integer, cid integer, type integer, "
+        "lastIvl integer, ease integer, time integer)"
+    )
+    for row in (
+        (1, 1, 0, 2, -2, 1),
+        (2, 1, 0, 0, -2, 1),
+        (3, 1, 0, 0, -3, 2),
+    ):
+        db.execute("insert into cards values (?, ?, ?, ?, ?, ?)", row)
+
+    node = DeckNode(1)
+    node.review_count = 5
+    node.learn_count = 3
+    node.new_count = 4
+    mod.mw.col.db = db
+    mod.mw.col.sched._deck_tree = DeckNode(0, [node])
+    mod.mw.col.sched.day_cutoff = 86400
+    mod.currDID = 1
+    mod._current_main_window_state = "review"
+    mod.mw.reviewer = SimpleNamespace(
+        state="question",
+        _v3=SimpleNamespace(
+            queued_cards=SimpleNamespace(
+                new_count=1,
+                learning_count=3,
+                review_count=3,
+            )
+        ),
+    )
+
+    mod.updateCountsForAllDecks(True)
+
+    assert mod.rawRemainCount[1] == 7
+    assert mod.actionableRevCount[1] == 3
+    assert mod.actionableLrnCount[1] == 3
+    assert mod.actionableNewCount[1] == 1
+    assert mod.buriedRevCount[1] == 3
+    assert mod.buriedLrnCount[1] == 0
+    assert mod.buriedNewCount[1] == 5
 
 
 def test_completed_counts_use_historical_answer_state_and_original_deck(addon_module):
@@ -798,7 +879,7 @@ def test_queue_counts_respect_limits_and_exclude_suspended_and_buried(addon_modu
     node.new_count = 2
     mod.mw.col.sched.day_cutoff = 86400
 
-    assert mod._queue_counts_for_node(node) == (1, 1, 1, 1, 0, 1)
+    assert mod._queue_counts_for_node(node) == (1, 1, 2, 1, 0, 1)
 
 
 def test_buried_counter_excludes_cards_not_due_until_after_today(addon_module):
@@ -821,9 +902,9 @@ def test_buried_counter_excludes_cards_not_due_until_after_today(addon_module):
     mod.mw.col.sched.day_cutoff = 2000000000
 
     node = DeckNode(1)
-    node.review_count = 3
-    node.learn_count = 3
-    node.new_count = 1
+    node.review_count = 0
+    node.learn_count = 0
+    node.new_count = 0
 
     assert mod._queue_counts_for_node(node) == (0, 0, 0, 2, 2, 1)
 
