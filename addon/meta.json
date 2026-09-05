@@ -1,13 +1,13 @@
 {
   "name": "Progress_Bar_Reforged",
-  "mod": 1786224962,
+  "mod": 1788582008,
   "min_point_version": 49,
   "max_point_version": 260500,
   "branch_index": 0,
   "disabled": false,
   "conflicts": [],
   "update_enabled": true,
-  "human_version": "1.1.2",
+  "human_version": "1.1.3",
   "homepage": "https://github.com/caleblee789/Progress-Bar-Reforged",
   "config": {}
 }

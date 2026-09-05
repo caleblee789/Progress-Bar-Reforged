@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional
 
 
@@ -293,6 +294,7 @@ def base_dialog_qss(tokens: ThemeTokens) -> str:
         QCheckBox::indicator:checked {{
             background: {tokens.accent};
             border-color: {tokens.accent};
+            image: url("{(Path(__file__).resolve().parents[1] / 'assets' / 'check.svg').as_posix()}");
         }}
         QCheckBox::indicator:checked:hover {{
             background: {tokens.accent_hover};

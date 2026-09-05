@@ -33,6 +33,7 @@ toggle_shortcut: Optional[QShortcut] = None
 progress_tooltip_filter: Optional[QObject] = None
 interaction_filter: Optional[QObject] = None
 _click_handler = None
+_label_refresh_handler = None
 _progress_segment_tooltips: Dict[str, str] = {}
 _progress_fraction: float = 0.0
 _default_tooltip_text: str = ""
@@ -128,6 +129,11 @@ class _ProgressBarInteractionFilter(QObject):
         if obj is not progressBar:
             return False
 
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.FontChange):
+            if _label_refresh_handler is not None:
+                _label_refresh_handler()
+            return False
+
         global _click_handler
         if _click_handler is None:
             return False
@@ -141,7 +147,7 @@ class _ProgressBarInteractionFilter(QObject):
         if event.type() == QEvent.Type.ContextMenu:
             _click_handler()
             return True
-        if event.type() == QEvent.Type.KeyPress:
+        if event.type() in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
             qt_key = getattr(Qt, "Key", Qt)
             activation_keys = {
                 getattr(qt_key, "Key_Return", None),
@@ -149,7 +155,10 @@ class _ProgressBarInteractionFilter(QObject):
                 getattr(qt_key, "Key_Space", None),
             }
             if event.key() in activation_keys:
-                _click_handler()
+                # Anki binds Enter/Space as reviewer shortcuts. Reserve these
+                # keys while the bar has focus before Qt dispatches shortcuts.
+                if event.type() == QEvent.Type.KeyPress:
+                    _click_handler()
                 try:
                     event.accept()
                 except Exception:

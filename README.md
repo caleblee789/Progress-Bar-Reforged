@@ -1,9 +1,20 @@
-Progress_Bar_Reforged for Anki
+Progress Bar Reforged for Anki
 ===============================
 
-Progress_Bar_Reforged adds a dockable progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
+Progress Bar Reforged adds a dockable progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
 
-Current release: **v1.1.2**. Install from AnkiWeb with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the GitHub release artifacts.
+Current release: **v1.1.3**. [Install from AnkiWeb](https://ankiweb.net/shared/info/1511983907) with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the [latest GitHub release](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+
+What's new in v1.1.3
+--------------------
+
+* **More consistent progress** - improved calculations for new and learning cards, filtered decks, and the start of a new study day.
+* **Better time estimates** - more precise review timing, correct finish times across clock changes, and a finish estimate that stays visible when you reopen the deck breakdown.
+* **Details that fit your window** - Advanced mode restores its extra information when you widen the window.
+* **Counts that stay current** - the Home and deck overview displays refresh after card changes; decks containing only buried cards remain visible in the breakdown.
+* **Smoother controls** - clearer checkmarks, improved keyboard access and shortcut recording, and Settings that follows Anki's theme in Auto mode.
+
+See the [v1.1.3 release notes](docs/releases/v1.1.3.md) for validation details and remaining platform checks.
 
 What's new in v1.1.2
 --------------------
@@ -24,7 +35,7 @@ Features
 
 * **Live reviewer progress** - choose Simple or Advanced mode to control how much progress detail appears while reviewing. In review, Cards left matches Anki's active reviewer queue; cards already buried or hidden by sibling burying appear in the buried breakdown.
 * **Current-deck counting** - track active New/Learning/Review work, completed cards, percentage done, speed, time spent, time left, and ETA.
-* **Deck breakdown dialog** - click the bar to inspect per-deck actionable and buried counts for New/Learning/Review cards, with ETAs once today's pace is known.
+* **Deck breakdown dialog** - click the bar to inspect New/Learning/Review cards and buried cards by deck, with finish estimates when a usable study pace is available.
 * **Retention metrics** - Advanced mode shows Again rate, Retention, optional super-mature retention, and yesterday comparisons.
 * **Display and appearance controls** - show the bar during reviews only or on both the deck browser and review screens, choose top or bottom docking, and use Auto, Light, or Dark theme.
 * **Session history data** - preserve daily pace metrics for compatibility with existing profiles.
@@ -34,7 +45,20 @@ Features
 Compatibility
 -------------
 
-The add-on supports Anki 2.1.49 and newer. Release metadata records Anki 26.05 (`260500`) as the current tested API target in `addon/meta.json`.
+The add-on is designed for Anki desktop 2.1.49 and newer. See the [release notes](docs/releases/v1.1.3.md) for the available testing coverage.
+
+Screenshots
+-----------
+
+**Progress while reviewing**
+
+![Progress Bar Reforged during an Anki review session](screenshots/progress-bar-reviewer.png)
+
+The review example also shows a custom card background and other add-ons.
+
+**Deck breakdown**
+
+![Deck breakdown with card counts, buried cards, and finish estimates](screenshots/deck-breakdown.png)
 
 Installation
 ------------
@@ -49,7 +73,7 @@ AnkiWeb page: <https://ankiweb.net/shared/info/1511983907>
 
 ### From a Release Package
 
-1. Download `progress_bar_time_left.ankiaddon` from the GitHub release artifacts.
+1. Download `progress_bar_time_left.ankiaddon` from the [latest release](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
 2. In Anki, open **Tools -> Add-ons -> Install from file...**
 3. Select the downloaded `.ankiaddon` file.
 4. Restart Anki.
@@ -64,7 +88,7 @@ AnkiWeb page: <https://ankiweb.net/shared/info/1511983907>
 Usage
 -----
 
-* The progress bar appears as a dock in Anki's main window, top-docked by default, during reviews only.
+* The progress bar appears as a dock in Anki's main window, top-docked by default, during reviews only, in Advanced mode.
 * Press the toggle shortcut, `Ctrl+G` by default (`Command+G` on macOS), to show or hide it.
 * Hover the bar for context-aware explanations of the current metrics.
 * Click the bar, or focus it and press Enter/Space, to open the deck breakdown.
@@ -84,6 +108,8 @@ Useful configuration keys:
 * **Compatibility** - older advanced JSON keys are tolerated, but the supported settings surface is intentionally lightweight.
 
 See [docs/config.md](docs/config.md) for more detail.
+
+The completion percentage compares answers completed with answers completed plus cards left. Answering the same card again counts as another answer. The filled area also accounts for how often you have pressed Again recently, so it can differ from the displayed percentage. Time estimates use your recorded study pace and become more specific to today's session as you answer cards.
 
 Troubleshooting
 ---------------

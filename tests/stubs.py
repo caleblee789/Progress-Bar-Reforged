@@ -170,6 +170,9 @@ class Qt:
         StrongFocus = 1
         ClickFocus = 2
 
+    class FocusReason:
+        MouseFocusReason = 0
+
     class MouseButton:
         LeftButton = 1
         RightButton = 2
@@ -1208,6 +1211,10 @@ class QObject(QWidget):
 
 class QEvent:
     class Type:
+        Resize = 14
+        Show = 17
+        FontChange = 97
+        ShortcutOverride = 51
         ToolTip = 0
         MouseButtonRelease = 1
         ContextMenu = 2

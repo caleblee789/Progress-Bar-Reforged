@@ -31,6 +31,7 @@ class ProgressState:
     latest_breakdown_rows: List[Dict[str, Any]] = field(default_factory=list)
     latest_breakdown_summary: Optional[Dict[str, Any]] = None
     last_cards_per_minute: Optional[float] = None
+    weight_history_key: Optional[tuple[int, int, int]] = None
 
     def reset_for_profile(self) -> None:
         for counts in (
@@ -49,3 +50,4 @@ class ProgressState:
         self.latest_breakdown_rows = []
         self.latest_breakdown_summary = None
         self.last_cards_per_minute = None
+        self.weight_history_key = None

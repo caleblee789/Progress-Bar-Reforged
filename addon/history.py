@@ -24,6 +24,7 @@ from aqt.qt import (
 )
 
 from .ui.theme import history_dialog_qss, resolve_theme_tokens, ui_palette
+from .progress.scheduler import day_boundary_ms
 
 try:
     from aqt.qt import QPainter, QPen, QSizePolicy  # type: ignore
@@ -101,7 +102,7 @@ def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
         day = entry.get("day")
         try:
             day_int = int(day)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         cards = max(0, int(_safe_number(entry.get("cards", 0))))
         avg_seconds = max(0.0, _safe_number(entry.get("avg_seconds", 0.0)))
@@ -137,8 +138,8 @@ def calculate_today_history_entry(
     deck_ids_for_query: List[int],
     stats_between: Callable[[int, int, List[int]], Optional[tuple]],
 ) -> Optional[Dict[str, Any]]:
-    day_start = (day_cutoff - 86400) * 1000
-    day_end = day_cutoff * 1000
+    day_start = day_boundary_ms(day_cutoff, 1)
+    day_end = day_boundary_ms(day_cutoff)
 
     stats_today = stats_between(day_start, day_end, deck_ids_for_query)
     if not stats_today:

@@ -312,7 +312,9 @@ def _current_day_stamp() -> int:
 
 
 def _prepare_counts_for_new_profile() -> None:
+    global lrn_weight, new_weight, rev_weight
     _progress_state.reset_for_profile()
+    lrn_weight = new_weight = rev_weight = 1.0
 
 
 def _ensure_persisted_progress_loaded() -> None:
@@ -452,53 +454,17 @@ def _persist_progress_snapshot(*, force: bool = False) -> None:
 
 
 def add_info():
-    # card types: 0=new, 1=lrn, 2=rev, 3=relrn
-    # queue types: 0=new, 1=(re)lrn, 2=rev, 3=day (re)lrn,
-    #   4=preview, -1=suspended, -2=sibling buried, -3=manually buried
-
-    # revlog types: 0=lrn, 1=rev, 2=relrn, 3=early review
-    # positive revlog intervals are in days (rev), negative in seconds (lrn)
-    # odue/odid store original due/did when cards moved to filtered deck
+    """Cache Again-rate weights for this profile, scheduler day, and lookback."""
     if mw.col is None or getattr(mw.col, "db", None) is None or getattr(mw.col, "sched", None) is None:
         return
-
-    x = (mw.col.sched.day_cutoff - 86400 * settings.no_days) * 1000
-    y = (mw.col.sched.day_cutoff - 86400) * 1000
-    """Calculate progress using weights and card counts from the sched."""
-    # Get studied cards  and true retention stats
-    x_new, x_new_pass, x_learn, x_learn_pass, x_flunked, x_passed = mw.col.db.first("""
-                select
-                sum(case when ease = 1 and type == 0 and lastIvl == 0 then 1 else 0 end), /* xnew agains */
-                sum(case when ease > 1 and type == 0 and lastIvl == 0 then 1 else 0 end), /* xnew pass */
-                sum(case when ease = 1 and type in (0, 2) and type != 1 and type != 3 then 1 else 0 end), /* xlearn agains */
-                sum(case when ease > 1 and type in (0, 2) and type != 1 and type != 3 then 1 else 0 end), /* xlearn pass */
-                sum(case when ease = 1 and type in (1, 3) and type != 0 and type != 2 then 1 else 0 end), /* x_flunked */
-                sum(case when ease > 1 and type in (1, 3) and type != 0 and type != 2 then 1 else 0 end) /* x_passed */
-                from revlog where id between ? and ?""", x, y)
-    x_new = x_new or 0
-    x_new_pass = x_new_pass or 0
-
-    x_learn = x_learn or 0
-    x_learn_pass = x_learn_pass or 0
-
-    x_flunked = x_flunked or 0
-    x_passed = x_passed or 0
-
-    """Calculate progress using weights and card counts from the sched."""
-
-    #retention rate for review cards
-    tr = (float(x_flunked / (float(max(1, x_passed + x_flunked)))))
-
-    x_learn_agains = float(x_learn / max(1, (x_learn + x_learn_pass)))
-    x_new_agains = float(x_new / max(1, (x_new + x_new_pass)))
-
-    global lrn_weight
-    global new_weight
-    global rev_weight
-
-    lrn_weight = float((1 + (1 * x_learn_agains * settings.lrn_steps)) / 1)
-    new_weight = float((1 + (1 * x_new_agains * settings.lrn_steps)) / 1)
-    rev_weight = float((1 + (1 * tr * settings.lrn_steps)) / 1)
+    key = (id(mw.col), int(mw.col.sched.day_cutoff), settings.no_days)
+    if _progress_state.weight_history_key == key:
+        return
+    start = progress_scheduler.day_boundary_ms(key[1], settings.no_days + 1)
+    end = progress_scheduler.day_boundary_ms(key[1], 1)
+    global lrn_weight, new_weight, rev_weight
+    rev_weight, lrn_weight, new_weight = progress_scheduler.historical_weights(mw.col.db, start, end)
+    _progress_state.weight_history_key = key
 
 
 register_once(gui_hooks.main_window_did_init, add_info, "main_window_did_init")
@@ -514,6 +480,7 @@ def initPB() -> None:
         return
     progress_ui.init_progress_bar()
     progress_ui.set_click_handler(_open_deck_breakdown_dialog)
+    progress_ui._label_refresh_handler = _refresh_progress_label
 
 
 def _remove_progress_bar() -> None:
@@ -528,6 +495,7 @@ def _reinitialize_progress_bar() -> None:
         return
     progress_ui.reinitialize_progress_bar()
     progress_ui.set_click_handler(_open_deck_breakdown_dialog)
+    progress_ui._label_refresh_handler = _refresh_progress_label
     if settings.progress_bar_enabled and mw.col is not None and getattr(mw.col, "db", None) is not None:
         _ensure_persisted_progress_loaded()
         updateCountsForAllDecks(True)
@@ -564,7 +532,10 @@ def _collect_deck_ids(node) -> List[int]:
 
 
 def _done_counts_by_deck_since(cutoff: int) -> Dict[int, Tuple[int, int, int]]:
-    return progress_scheduler.completed_counts_by_deck(mw.col.db, cutoff)
+    return progress_scheduler.completed_counts_by_deck(
+        mw.col.db, cutoff, progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff),
+        current_deck=currDID,
+    )
 
 
 def _queue_counts_for_node(
@@ -590,7 +561,9 @@ def _current_reviewer_queue_counts() -> Optional[Tuple[int, int, int]]:
 
 
 def _revlog_stats_since(cutoff: int, deck_ids: List[int]):
-    return progress_scheduler.revlog_stats(mw.col.db, cutoff, None, deck_ids)
+    return progress_scheduler.revlog_stats(
+        mw.col.db, cutoff, progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff), deck_ids
+    )
 
 
 def _revlog_stats_between(start: int, end: int, deck_ids: List[int]):
@@ -614,7 +587,7 @@ def _historical_seconds_per_card(today: int) -> Optional[float]:
     total_cards = 0
     total_seconds = 0.0
     for entry in history.read_history_records(profile):
-        if int(entry.get("day", 0)) == today:
+        if int(entry.get("day", 0)) >= today:
             continue
         cards = int(entry.get("cards", 0) or 0)
         avg_seconds = float(entry.get("avg_seconds", 0.0) or 0.0)
@@ -628,9 +601,9 @@ def _historical_seconds_per_card(today: int) -> Optional[float]:
     return total_seconds / total_cards
 
 
-def _pace_estimate_for_today(cards_today: int, seconds_today: int) -> Optional[Tuple[float, str]]:
+def _pace_estimate_for_today(cards_today: int, seconds_today: float) -> Optional[Tuple[float, str]]:
     if cards_today >= _TODAY_PACE_MIN_CARDS and seconds_today > 0:
-        return (max(1.0, float(seconds_today)) / cards_today, "today")
+        return (float(seconds_today) / cards_today, "today")
 
     historical_seconds = _historical_seconds_per_card(_current_day_stamp())
     if historical_seconds and historical_seconds > 0:
@@ -648,8 +621,12 @@ def _pace_projection_text(source: str) -> str:
 def _format_eta_time(seconds_remaining: int, tzinfo) -> str:
     if seconds_remaining <= 0:
         return "N/A"
-    now_tz = datetime.now(tz=tzinfo)
-    eta_dt = now_tz + timedelta(seconds=seconds_remaining)
+    # Convert the future instant after adding measured elapsed seconds. The
+    # current system UTC offset can change before a session finishes.
+    display_tz = None if settings.use_system_timezone else tzinfo
+    now = time.time()
+    now_tz = datetime.fromtimestamp(now, tz=display_tz)
+    eta_dt = datetime.fromtimestamp(now + seconds_remaining, tz=display_tz)
     eta_display = eta_dt.strftime("%I:%M %p")
     days_ahead = (eta_dt.date() - now_tz.date()).days
     if days_ahead > 0:
@@ -710,9 +687,13 @@ def _refresh_breakdown_dialog() -> None:
 def _refresh_open_theme_surfaces(settings_dialog: Optional["ProgressBarConfigDialog"] = None) -> None:
     global _deck_breakdown_dialog
     global _session_history_dialog
-    if settings_dialog is not None:
+    settings_dialogs = [settings_dialog] if settings_dialog is not None else []
+    if settings_dialog is None:
+        top_levels = getattr(QApplication, "topLevelWidgets", lambda: [])()
+        settings_dialogs = [widget for widget in top_levels if isinstance(widget, ProgressBarConfigDialog) and widget.isVisible()]
+    for dialog in settings_dialogs:
         try:
-            settings_dialog.apply_theme()
+            dialog.apply_theme()
         except RuntimeError:
             pass
     if _deck_breakdown_dialog is not None:
@@ -748,7 +729,12 @@ def _fit_progress_bar_format(full_text: str, compact_text: str, minimal_text: st
             main_width_getter = getattr(mw, "width", None)
             if callable(main_width_getter):
                 width_candidates.append(int(main_width_getter()))
-        live_width = max([width for width in width_candidates if width > 0], default=0)
+        # A visible dock has its actual layout width. The main-window fallback
+        # is only needed before Qt has laid out a newly created bar.
+        if getattr(bar, "isVisible", lambda: False)() and bar.width() > 0:
+            live_width = int(bar.width())
+        else:
+            live_width = max([width for width in width_candidates if width > 0], default=0)
         available = max(0, live_width - 16)
         metrics = bar.fontMetrics()
         measure = getattr(metrics, "horizontalAdvance", None)
@@ -756,11 +742,22 @@ def _fit_progress_bar_format(full_text: str, compact_text: str, minimal_text: st
             measure = getattr(metrics, "width", None)
         if not callable(measure) or int(measure(full_text)) <= available:
             return full_text
+        dense_text = full_text.replace("     |     ", " | ")
+        if int(measure(dense_text)) <= available:
+            return dense_text
         if int(measure(compact_text)) <= available:
             return compact_text
         return minimal_text
     except (AttributeError, RuntimeError, TypeError, ValueError):
         return full_text
+
+
+def _refresh_progress_label() -> None:
+    """Refit cached text after layout changes without querying the collection."""
+    bar = progress_ui.progressBar
+    variants = getattr(bar, "_progress_label_variants", None)
+    if variants is not None:
+        bar.setFormat(_fit_progress_bar_format(*variants))
 
 
 def _open_deck_breakdown_dialog() -> None:
@@ -775,7 +772,9 @@ def _open_deck_breakdown_dialog() -> None:
             _deck_breakdown_dialog = DeckBreakdownDialog(mw)
 
     _deck_breakdown_dialog.request_auto_fit()
-    _deck_breakdown_dialog.update_rows(_progress_state.latest_breakdown_rows)
+    _deck_breakdown_dialog.update_rows(
+        _progress_state.latest_breakdown_rows, _progress_state.latest_breakdown_summary
+    )
     _deck_breakdown_dialog.show()
     _deck_breakdown_dialog.raise_()
     _deck_breakdown_dialog.activateWindow()
@@ -788,7 +787,7 @@ def updatePB():
     if progress_ui.progressBar is None:
         return
 
-    a = (mw.col.sched.day_cutoff - 86400) * 1000
+    a = progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff, 1)
 
     deck_tree = mw.col.sched.deck_due_tree()
     if currDID is None:
@@ -839,8 +838,8 @@ def updatePB():
         again = "N/A"
 
     # Yesterday-only metrics (strict previous day window)
-    y_start = (mw.col.sched.day_cutoff - 86400 * 2) * 1000
-    y_end = (mw.col.sched.day_cutoff - 86400) * 1000
+    y_start = progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff, 2)
+    y_end = a
 
     stats_yesterday = _revlog_stats_between(y_start, y_end, deck_ids_for_query)
     if stats_yesterday:
@@ -908,22 +907,20 @@ def updatePB():
     var_diff = actionable_left
 
     if cards > 0:
-        safe_time = max(thetime, 1)
-        secspeed_value = safe_time / cards
+        secspeed_value = max(thetime, 0) / cards
         secspeed_display = f"{secspeed_value:.02f}"
     else:
         secspeed_value = 0
         secspeed_display = "N/A"
 
     if ycards > 0:
-        safe_ytime = max(ythetime, 1)
-        ysecspeed_value = safe_ytime / ycards
+        ysecspeed_value = max(ythetime, 0) / ycards
         ysecspeed_display = f"{ysecspeed_value:.02f}"
     else:
         ysecspeed_value = 0
         ysecspeed_display = "N/A"
 
-    pace_estimate = _pace_estimate_for_today(int(cards), int(thetime))
+    pace_estimate = _pace_estimate_for_today(int(cards), float(thetime))
     if pace_estimate is not None:
         pace_seconds_per_card, pace_source = pace_estimate
         speed = 60.0 / pace_seconds_per_card
@@ -1040,9 +1037,18 @@ def updatePB():
     percent = 100 if raw_total == 0 else (100 * raw_done / raw_total)
     percentdiff = 100 - percent
 
-    tooltip_lines: List[str] = []
-    completed_tooltip_lines: List[str] = []
-    remaining_tooltip_lines: List[str] = []
+    progress_explanation = (
+        "The fill adjusts review work using historical Again rates. "
+        "The percentage uses completed answers and cards left. "
+        "Repeat answers count separately."
+    )
+    tooltip_lines: List[str] = [progress_explanation]
+    completed_tooltip_lines: List[str] = [progress_explanation]
+    remaining_tooltip_lines: List[str] = [progress_explanation]
+    progress_ui.progressBar.setAccessibleDescription(
+        f"{raw_done} completed answers, {var_diff} cards left, {percent:.0f}% by count. "
+        + progress_explanation + " Press Enter or Space to open the deck breakdown."
+    )
 
     goal_text_parts: List[str] = []
     goal_tooltip_lines: List[str] = []
@@ -1323,7 +1329,7 @@ def updatePB():
 
     completed_tooltip = "\n".join(completed_tooltip_lines) if completed_tooltip_lines else default_tooltip
     remaining_tooltip = "\n".join(remaining_tooltip_lines) if remaining_tooltip_lines else default_tooltip
-    progress_fraction = 0.0
+    progress_fraction = 1.0
     if progress_max > 0:
         progress_fraction = min(1.0, max(0.0, progress_value / progress_max))
 
@@ -1350,8 +1356,8 @@ def updatePB():
     minimal_output = f"{raw_done}/{raw_total}  |  {var_diff:.0f} left"
     if warning_active:
         minimal_output += "  ⚠"
-    format_output = _fit_progress_bar_format(format_output, compact_output, minimal_output)
-    progress_ui.progressBar.setFormat(format_output)
+    progress_ui.progressBar._progress_label_variants = (format_output, compact_output, minimal_output)
+    _refresh_progress_label()
     global _warning_active
     if warning_active != _warning_active:
         progress_ui.apply_bar_style(warning_active)
@@ -1414,7 +1420,9 @@ def updateCountsForAllDecks(updateTotal: bool) -> None:
     if mw.col is None:
         return
 
-    today_cutoff = (mw.col.sched.day_cutoff - 86400) * 1000
+    _ensure_persisted_progress_loaded()
+    add_info()
+    today_cutoff = progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff, 1)
     done_by_deck = _done_counts_by_deck_since(today_cutoff)
     active_queue_counts = _current_reviewer_queue_counts()
 
@@ -1568,6 +1576,24 @@ def _on_reviewer_did_show_question(*_args: Any) -> None:
     showQuestionCallBack()
 
 
+def _on_operation_did_execute(changes: Any, _handler: Any) -> None:
+    """Refresh Home/Overview after edits that do not change Anki's screen."""
+    if (
+        getattr(changes, "study_queues", False)
+        and _current_main_window_state in {"deckBrowser", "overview"}
+        and progress_ui.progressBar is not None
+        and mw.col is not None
+    ):
+        updateCountsForAllDecks(True)
+        updatePB()
+
+
+def _on_day_did_change() -> None:
+    if mw.col is not None and settings.progress_bar_enabled:
+        updateCountsForAllDecks(True)
+        updatePB()
+
+
 # The package supports Anki 2.1.49+, whose generated gui_hooks API replaces
 # the legacy string-based addHook callbacks.
 register_once(gui_hooks.state_did_change, _on_state_did_change, "state_did_change")
@@ -1576,10 +1602,18 @@ register_once(
     _on_reviewer_did_show_question,
     "reviewer_did_show_question",
 )
+if hasattr(gui_hooks, "operation_did_execute"):
+    register_once(gui_hooks.operation_did_execute, _on_operation_did_execute, "operation_did_execute")
+if hasattr(gui_hooks, "day_did_change"):
+    register_once(gui_hooks.day_did_change, _on_day_did_change, "day_did_change")
 
 
 def _on_profile_did_open() -> None:
     _prepare_counts_for_new_profile()
+    # Anki may already have shown Home before this hook. Keep the actual
+    # screen state so applying settings after a profile switch preserves it.
+    _progress_state.main_window_state = getattr(mw, "state", _current_main_window_state) or "deckBrowser"
+    add_info()
 
 
 def _on_profile_will_close() -> None:
@@ -1883,10 +1917,18 @@ class _ShortcutRecorderFilter(QObject):
             self._owner._arm_recording()
             return False
         if event_type == getattr(event_types, "FocusIn", object()) and not self._owner._recording_armed:
+            # Qt gives the editor mouse focus before delivering the click.
+            # Rejecting that FocusIn makes the visible recorder unclickable.
+            mouse_focus = getattr(getattr(Qt, "FocusReason", Qt), "MouseFocusReason", None)
+            reason = getattr(event, "reason", lambda: None)()
+            if mouse_focus is not None and reason == mouse_focus:
+                self._owner._arm_recording()
+                return False
             self._owner._disarm_recording(refocus_web=False)
             return True
         if event_type == getattr(event_types, "FocusOut", object()):
             self._owner._recording_armed = False
+            self._owner._record_hint.setText("Click, then press keys.")
             return False
         return False
 
@@ -2262,7 +2304,8 @@ def _filter_breakdown_rows(rows: List[Dict[str, Any]], hide_empty: bool) -> List
     for row in rows:
         children = _filter_breakdown_rows(list(row.get("children", [])), hide_empty)
         actionable_total = _count_total(row.get("actionable", (0, 0, 0)))
-        if not hide_empty or actionable_total > 0 or children:
+        buried_total = _count_total(row.get("buried", (0, 0, 0)))
+        if not hide_empty or actionable_total > 0 or buried_total > 0 or children:
             filtered.append(_clone_breakdown_row(row, children))
     return filtered
 
@@ -2815,7 +2858,7 @@ class DeckBreakdownDialog(QDialog):
         controls.setSpacing(8)
 
         self._hide_empty_cb = QCheckBox("Hide empty")
-        self._hide_empty_cb.setToolTip("Hide decks with no cards due today unless a child deck has work.")
+        self._hide_empty_cb.setToolTip("Hide decks with no actionable or buried cards unless a child deck has work.")
         self._hide_empty_cb.setChecked(True)
         self._hide_empty_cb.toggled.connect(self._on_hide_empty_changed)
 
@@ -2835,6 +2878,8 @@ class DeckBreakdownDialog(QDialog):
         layout.addWidget(self._toolbar)
 
         self._tree = QTreeWidget()
+        self._tree.setAccessibleName("Deck workload breakdown")
+        self._tree.setAccessibleDescription("Decks with New, Learning, Review, buried counts, and estimated finish times.")
         self._tree.setRootIsDecorated(True)
         self._tree.setUniformRowHeights(False)
         self._tree.setAlternatingRowColors(True)

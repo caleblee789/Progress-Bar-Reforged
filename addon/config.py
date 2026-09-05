@@ -160,7 +160,6 @@ class Settings:
     counting_basis: str
     count_scope: str
     force_forward: bool
-    lrn_steps: int
     no_days: int
     use_system_timezone: bool
     tz: int
@@ -461,7 +460,7 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         toggle_shortcut = "Ctrl+G"
     normalized["toggle_shortcut"] = toggle_shortcut
 
-    lrn_steps = _int("lrn_steps", 2, minimum=1)
+    # Legacy lrn_steps stays in raw_config as inert compatibility data.
     no_days = _int("no_days", 7, minimum=1)
     use_system_timezone = _bool("use_system_timezone", True)
     tz = _int("tz", 0, minimum=-12, maximum=14)
@@ -654,7 +653,6 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         counting_basis=counting_basis_raw,
         count_scope=count_scope_raw,
         force_forward=force_forward,
-        lrn_steps=lrn_steps,
         no_days=no_days,
         use_system_timezone=use_system_timezone,
         tz=tz,

@@ -320,6 +320,12 @@ def test_mode_and_theme_validation(mw):
 def test_display_location_validation_defaults_to_review(mw):
     from addon import config as addon_config
 
+    packaged = json.loads((Path(__file__).parents[1] / "addon" / "config.json").read_text())
+    for defaults in ({}, packaged):
+        addon_config.apply_config(mw, defaults)
+        assert addon_config.settings.display_location == "review"
+        assert addon_config.settings.mode == "stats"
+
     addon_config.apply_config(mw, {"display_location": "home"})
 
     assert addon_config.settings.display_location == "review"
@@ -520,6 +526,13 @@ def test_shortcut_recorder_only_records_after_click_and_disarms(addon_module):
     assert field._editor._maximum_sequence_length == 1
     assert recorder_filter.eventFilter(field._editor, QEvent(QEvent.Type.FocusIn)) is True
     assert field._recording_armed is False
+
+    mouse_focus = SimpleNamespace(type=lambda: QEvent.Type.FocusIn, reason=lambda: Qt.FocusReason.MouseFocusReason)
+    assert recorder_filter.eventFilter(field._editor, mouse_focus) is False
+    assert field._recording_armed is True
+    recorder_filter.eventFilter(field._editor, QEvent(QEvent.Type.FocusOut))
+    assert field._recording_armed is False
+    assert field._record_hint.text() == "Click, then press keys."
 
     assert recorder_filter.eventFilter(
         field._editor,
@@ -853,8 +866,12 @@ def test_completed_counts_use_historical_answer_state_and_original_deck(addon_mo
     ):
         db.execute("insert into revlog values (?, ?, ?, ?, ?, ?)", row)
     mod.mw.col.db = db
+    mod.mw.col.sched.day_cutoff = 3
 
     assert mod._done_counts_by_deck_since(1000) == {10: (1, 2, 1)}
+    mod.currDID = 99
+    assert mod._done_counts_by_deck_since(1000) == {10: (0, 2, 1), 99: (1, 0, 0)}
+    assert mod._revlog_stats_since(1000, [99])[0] == 1
 
 
 def test_queue_counts_respect_limits_and_exclude_suspended_and_buried(addon_module):
@@ -907,6 +924,9 @@ def test_buried_counter_excludes_cards_not_due_until_after_today(addon_module):
     node.new_count = 0
 
     assert mod._queue_counts_for_node(node) == (0, 0, 0, 2, 2, 1)
+    mod.mw.col.sched.today = 0
+    db.execute("update cards set due = due - 23148 where due < 1000000000")
+    assert mod._queue_counts_for_node(node) == (0, 0, 0, 2, 2, 1)
 
 
 def test_nested_deck_counts_are_aggregated_once_at_the_selected_root(addon_module):
@@ -934,15 +954,111 @@ def test_revlog_windows_are_half_open(addon_module):
     db = SQLiteDB()
     db.execute("create table revlog (id integer, cid integer, type integer, lastIvl integer, ease integer, time integer)")
     for row in (
-        (1000, 1, 1, 10, 3, 1000),
-        (1999, 2, 1, 10, 3, 1000),
+        (1000, 1, 1, 99, 1, 125),
+        (1999, 2, 1, 100, 3, 250),
         (2000, 3, 1, 10, 3, 1000),
+        (1500, 4, 4, 100, 0, 9999),  # manual scheduling is not an answer
+        (1600, 5, 1, 100, 0, 9999),
     ):
         db.execute("insert into revlog values (?, ?, ?, ?, ?, ?)", row)
     mod.mw.col.db = db
 
     stats = mod._revlog_stats_between(1000, 2000, [])
     assert stats[0] == 2
+    assert stats == (2, 1, 1, 1, 1, 0, 0.375)
+    assert mod.progress_scheduler.revlog_stats(db, 1000, None, []) == (3, 1, 1, 2, 1, 0, 1.375)
+
+
+def test_again_weights_and_all_metrics_ignore_legacy_learning_steps(addon_module, monkeypatch):
+    mod = addon_module
+    db = SQLiteDB()
+    db.execute("create table cards (id integer primary key, did integer, odid integer, type integer, queue integer, due integer)")
+    db.execute("create table revlog (id integer, cid integer, type integer, lastIvl integer, ease integer, time integer)")
+    mod.mw.col.db = db
+    mod.mw.col.sched.day_cutoff = 86400 * 100
+    start = mod.progress_scheduler.day_boundary_ms(mod.mw.col.sched.day_cutoff, 3)
+    today = mod.progress_scheduler.day_boundary_ms(mod.mw.col.sched.day_cutoff, 1)
+    # Review: 1/2 Again; Learning: 1/4 Again; New: 0/2 Again.
+    history_rows = [(1, 10, 1), (3, 10, 3), (0, -60, 1), (0, -60, 3),
+                    (2, 10, 3), (2, 10, 3), (0, 0, 3), (0, 0, 3)]
+    for index, (kind, interval, ease) in enumerate(history_rows):
+        db.execute("insert into revlog values (?, 1, ?, ?, ?, 500)", (start + index, kind, interval, ease))
+    for stamp, kind, ease in ((start - 1, 0, 1), (start + 20, 4, 1), (start + 21, 0, 0)):
+        db.execute("insert into revlog values (?, 1, ?, 0, ?, 9999)", (stamp, kind, ease))
+    db.execute("insert into cards values (1, 1, 0, 2, 2, 0)")
+    for index in range(4):
+        db.execute("insert into revlog values (?, 1, 1, 10, 3, 125)", (today + index,))
+    node = DeckNode(1)
+    node.new_count = 6
+    mod.mw.col.sched._deck_tree = DeckNode(0, [node])
+    monkeypatch.setattr(mod, "_format_eta_time", lambda seconds, tz: str(seconds))
+    snapshots = []
+    for legacy_steps in (1, 10, 999, "ignored"):
+        mod._apply_config({"mode": "simple", "no_days": 2, "lrn_steps": legacy_steps})
+        mod._on_profile_did_open()
+        mod.updateCountsForAllDecks(True)
+        mod.initPB()
+        mod.updatePB()
+        mod._persist_progress_snapshot(force=True)
+        snapshots.append((mod.rev_weight, mod.lrn_weight, mod.new_weight,
+                          mod.progressBar._range, mod.progressBar._value,
+                          mod.progressBar.format(), mod.progressBar.toolTip(),
+                          mod._last_cards_per_minute,
+                          mod.history.read_history_records(mod.mw.pm.profile)))
+        mod._remove_progress_bar()
+    assert all(snapshot == snapshots[0] for snapshot in snapshots)
+    assert snapshots[0][:5] == (1.5, 1.25, 1.0, (0, 12000), 6000)
+    assert snapshots[0][5] == "4/10 (40%)"
+    assert snapshots[0][-1][0]["avg_seconds"] == 0.125
+
+    # Today's answers cannot alter today's weights, but become history tomorrow.
+    db.execute("insert into revlog values (?, 1, 0, 0, 1, 500)", (today + 10,))
+    mod.updateCountsForAllDecks(False)
+    assert mod.new_weight == 1.0
+    mod.mw.col.sched.day_cutoff += 86400
+    mod.updateCountsForAllDecks(False)
+    assert mod.new_weight == 2.0
+    assert mod.rawDoneCount[1] == 0
+    mod._apply_config({"no_days": 1})
+    mod.updateCountsForAllDecks(True)
+    assert mod.rev_weight == 1.0
+    mod.mw.col.db = SQLiteDB()
+    mod.mw.col.db.execute("create table revlog (id integer, type integer, lastIvl integer, ease integer)")
+    mod._on_profile_did_open()
+    assert (mod.rev_weight, mod.lrn_weight, mod.new_weight) == (1.0, 1.0, 1.0)
+
+
+def test_scheduler_windows_follow_local_days_across_dst(addon_module, monkeypatch):
+    import os
+    import pytest
+    import time
+    from datetime import datetime
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("requires local timezone switching")
+    original_tz = os.environ.get("TZ")
+    try:
+        monkeypatch.setenv("TZ", "America/Chicago")
+        time.tzset()
+        boundary = addon_module.progress_scheduler.day_boundary_ms
+        for month, day, hours in ((3, 8, 23), (11, 1, 25)):
+            cutoff = int(datetime(2026, month, day, 4).timestamp())
+            assert boundary(cutoff) - boundary(cutoff, 1) == hours * 3600000
+            assert datetime.fromtimestamp(boundary(cutoff, 1) / 1000).hour == 4
+        addon_module._apply_config({"use_system_timezone": True})
+        for now, seconds, expected in (
+            (datetime(2026, 3, 8, 1, 30), 7200, "04:30 AM"),
+            (datetime(2026, 11, 1, 0, 30), 10800, "02:30 AM"),
+            (datetime(2026, 9, 4, 23, 30), 7200, "01:30 AM+1"),
+        ):
+            monkeypatch.setattr(addon_module.time, "time", lambda: now.timestamp())
+            assert addon_module._format_eta_time(seconds, addon_module._current_tzinfo()) == expected
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
 
 
 def test_legacy_warning_config_is_ignored(addon_module):
@@ -1085,6 +1201,7 @@ def test_stats_zero_done_keeps_full_label_when_initial_width_is_unrealized(addon
     )
     mod.mw.resize(3000, 900)
     mod.progressBar.resize(80, 20)
+    mod.progressBar.hide()
     mod.progressBar.fontMetrics = lambda: Metrics()
     mod.mw.col.db = SequenceDB(first_rows=[today_stats, None, today_stats])
 
@@ -1150,6 +1267,26 @@ def test_initial_advanced_label_uses_main_window_width_when_bar_width_is_stale(a
     mod.progress_ui.progressBar = Bar()
 
     assert mod._fit_progress_bar_format(full, compact, minimal) == full
+
+
+def test_advanced_label_recovers_after_resize_in_both_display_locations(addon_module):
+    from tests.stubs import QEvent
+
+    mod = addon_module
+    full = "4 (40%) done | 6 left | 10 s/card | 25% Again | 80% Retention | ETA 11:00 AM"
+    compact = "4/10 (40%) | 6 left"
+    minimal = "4/10 | 6 left"
+    for location in ("review", "review_and_home"):
+        mod._apply_config({"mode": "stats", "display_location": location})
+        mod.initPB()
+        bar = mod.progressBar
+        bar.show()
+        bar._progress_label_variants = (full, compact, minimal)
+        bar.fontMetrics = lambda: SimpleNamespace(horizontalAdvance=lambda text: len(text) * 10)
+        for width, expected in ((250, compact), (1600, full), (150, minimal), (1600, full)):
+            bar.resize(width, 24)
+            mod.progress_ui.interaction_filter.eventFilter(bar, QEvent(QEvent.Type.Resize))
+            assert bar.format() == expected
 
 
 def test_history_export_writes_expected_rows(tmp_path: Path, addon_module):
@@ -1284,6 +1421,11 @@ def test_progress_bar_keyboard_activation_and_accessibility(addon_module):
     assert progress_ui.progressBar._focus_policy == Qt.FocusPolicy.StrongFocus
     assert progress_ui.progressBar._accessible_name == "Progress_Bar_Reforged"
     assert "deck breakdown" in progress_ui.progressBar._accessible_description
+
+    override = QEvent(QEvent.Type.ShortcutOverride, key=Qt.Key.Key_Return)
+    assert progress_ui.interaction_filter.eventFilter(progress_ui.progressBar, override) is True
+    assert override._accepted is True
+    assert calls == []
 
     key_event = QEvent(QEvent.Type.KeyPress, key=Qt.Key.Key_Return)
     assert progress_ui.interaction_filter.eventFilter(progress_ui.progressBar, key_event) is True
@@ -1495,7 +1637,7 @@ def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
     assert manifest["package"] == "1511983907"
     assert manifest["min_point_version"] == 49
     assert manifest["max_point_version"] == 260500
-    assert manifest["human_version"] == "1.1.2"
+    assert manifest["human_version"] == "1.1.3"
 
 
 def test_minimum_advertised_anki_version_uses_modern_gui_hooks(addon_module):
@@ -1692,20 +1834,21 @@ def test_deck_breakdown_hide_empty_keeps_non_empty_descendants(addon_module):
             },
             {"name": "Empty", "actionable": (0, 0, 0), "buried": (0, 0, 0), "eta": "N/A", "children": []},
             {"name": "Active", "actionable": (0, 0, 2), "buried": (0, 0, 0), "eta": "09:00 AM", "children": []},
+            {"name": "Buried only", "actionable": (0, 0, 0), "buried": (1, 0, 0), "eta": "N/A", "children": []},
         ]
     )
 
     assert dialog._hide_empty is True
     assert dialog._hide_empty_cb.isChecked() is True
-    assert [item.text(0) for item in dialog._tree._items] == ["Parent", "Active"]
+    assert [item.text(0) for item in dialog._tree._items] == ["Parent", "Active", "Buried only"]
 
     dialog._hide_empty_cb.setChecked(False)
 
-    assert [item.text(0) for item in dialog._tree._items] == ["Parent", "Empty", "Active"]
+    assert [item.text(0) for item in dialog._tree._items] == ["Parent", "Empty", "Active", "Buried only"]
 
     dialog._hide_empty_cb.setChecked(True)
 
-    assert [item.text(0) for item in dialog._tree._items] == ["Parent", "Active"]
+    assert [item.text(0) for item in dialog._tree._items] == ["Parent", "Active", "Buried only"]
     assert dialog._tree._items[0].children[0].text(0) == "Child Work"
 
 
@@ -1787,7 +1930,7 @@ def test_deck_breakdown_auto_fit_can_shrink_to_smaller_content(addon_module):
 
 def test_deck_breakdown_reopen_reused_dialog_shrinks_to_content(addon_module):
     mod = addon_module
-    mod._latest_breakdown_rows = [
+    mod._progress_state.latest_breakdown_rows = [
         {
             "name": "Short",
             "actionable": (1, 0, 0),
@@ -1796,9 +1939,15 @@ def test_deck_breakdown_reopen_reused_dialog_shrinks_to_content(addon_module):
             "children": [],
         }
     ]
+    summary = mod._build_breakdown_summary(mod._progress_state.latest_breakdown_rows)
+    summary["eta"] = "4:30 PM"
+    summary["main"] = mod._format_summary_main(summary)
+    summary["clipboard"] = mod._format_summary_clipboard(summary)
+    mod._progress_state.latest_breakdown_summary = summary
 
     mod._open_deck_breakdown_dialog()
     dialog = mod._deck_breakdown_dialog
+    assert "4:30 PM" in dialog._summary_card._main_label.text()
     dialog.resize(1200, 620)
 
     mod._open_deck_breakdown_dialog()
@@ -1806,6 +1955,7 @@ def test_deck_breakdown_reopen_reused_dialog_shrinks_to_content(addon_module):
     expected_width = sum(dialog._tree._column_widths.values()) + mod._BREAKDOWN_DIALOG_FRAME_WIDTH
     assert dialog._width == expected_width
     assert dialog._width < 1200
+    assert "4:30 PM" in dialog._summary_card._main_label.text()
 
 
 def test_deck_breakdown_reused_dialog_rethemes_after_settings_apply(addon_module):
@@ -2095,6 +2245,10 @@ def test_profile_close_disposes_dialogs_and_progress_dock(addon_module):
     assert mod._session_history_dialog is None
     assert mod.currDID is None
 
+    mod.mw.state = "deckBrowser"
+    mod._on_profile_did_open()
+    assert mod._progress_state.main_window_state == "deckBrowser"
+
 
 def test_deleted_dialog_references_are_dropped_during_retheme(addon_module):
     mod = addon_module
@@ -2127,15 +2281,19 @@ def test_empty_queues_render_as_complete_without_division_errors(addon_module):
     assert mod.progressBar._value == 1
 
 
-def test_auto_theme_change_rethemes_open_surfaces(addon_module):
+def test_auto_theme_change_rethemes_open_surfaces(addon_module, monkeypatch):
     from aqt.theme import theme_manager
 
     mod = addon_module
     mod._apply_config({"theme": "auto"})
     dialog = mod.DeckBreakdownDialog(mod.mw)
     mod._deck_breakdown_dialog = dialog
+    settings_dialog = mod.ProgressBarConfigDialog(mod.mw)
+    settings_dialog.show()
+    monkeypatch.setattr(mod.QApplication, "topLevelWidgets", lambda: [settings_dialog], raising=False)
     theme_manager.night_mode = True
 
     mod._on_theme_did_change()
 
     assert dialog._palette["window_bg"] == mod._ui_palette("dark")["window_bg"]
+    assert mod._ui_palette("dark")["window_bg"] in settings_dialog.styleSheet()
