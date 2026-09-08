@@ -70,7 +70,7 @@ def _coerce_int(value: Any, default: int) -> int:
         return default
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -80,7 +80,7 @@ def _coerce_float(value: Any, default: float) -> float:
     try:
         number = float(value)
         return number if math.isfinite(number) else default
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -88,7 +88,7 @@ def _normalize_dimension(value: Any) -> str:
     if value in (None, ""):
         return ""
     if isinstance(value, (int, float)):
-        if value <= 0:
+        if value <= 0 or (isinstance(value, float) and not math.isfinite(value)):
             return ""
         return f"{int(value)}px"
     value_str = str(value).strip()
@@ -298,7 +298,7 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
                 raise ValueError
             value = int(value_raw)
             conversion_failed = False
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             value = default
             conversion_failed = value_raw is not None
         if minimum is not None and value < minimum:
@@ -321,7 +321,7 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
             conversion_failed = not math.isfinite(value)
             if conversion_failed:
                 value = default
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             value = default
             conversion_failed = value_raw is not None
         if minimum is not None and value < minimum:

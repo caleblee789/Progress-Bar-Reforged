@@ -29,6 +29,7 @@ nmStyleApplied = 0
 nmUnavailable = 0
 progressBar: Optional[QProgressBar] = None
 progress_dock: Optional[QDockWidget] = None
+_progress_layout = None
 toggle_shortcut: Optional[QShortcut] = None
 progress_tooltip_filter: Optional[QObject] = None
 interaction_filter: Optional[QObject] = None
@@ -38,26 +39,6 @@ _progress_segment_tooltips: Dict[str, str] = {}
 _progress_fraction: float = 0.0
 _default_tooltip_text: str = ""
 PROGRESS_BAR_TOOLTIP_HINT = "Click for full Deck Breakdown."
-
-
-try:
-    # Remove that annoying separator strip if we have Night Mode, avoiding conflicts with this add-on.
-    import Night_Mode  # type: ignore[attr-defined]
-
-    existing_nm_css_menu = getattr(Night_Mode, "nm_css_menu", None)
-    if isinstance(existing_nm_css_menu, str):
-        Night_Mode.nm_css_menu = existing_nm_css_menu + '''
-            QMainWindow::separator
-        {
-            width: 0px;
-            height: 0px;
-        }
-        '''
-    else:
-        nmUnavailable = 1
-except Exception:
-    # Gracefully degrade if Night_Mode isn't installed or exposes an unexpected API.
-    nmUnavailable = 1
 
 
 def _update_progress_tooltips(
@@ -304,23 +285,7 @@ def apply_bar_style(is_warning: bool) -> None:
 
 
 def nmApplyStyle() -> None:
-    """Checks whether Night_Mode is disabled:
-        if so, we remove the separator here."""
-    global nmStyleApplied
-    if not nmUnavailable:
-        try:
-            nmStyleApplied = Night_Mode.nm_state_on
-        except Exception:
-            nmStyleApplied = 0
-    if not nmStyleApplied:
-        mw.setStyleSheet(
-            '''
-        QMainWindow::separator
-    {
-        width: 0px;
-        height: 0px;
-    }
-    ''')
+    """Compatibility hook; bar styling must not replace Anki's window theme."""
 
 
 def init_progress_bar() -> None:
@@ -329,6 +294,7 @@ def init_progress_bar() -> None:
     global progress_tooltip_filter
     global interaction_filter
     global progress_dock
+    global _progress_layout
     if config.settings is None:
         return
     if config.settings.stacked_segments:
@@ -353,6 +319,23 @@ def init_progress_bar() -> None:
         interaction_filter = _ProgressBarInteractionFilter()
     progressBar.installEventFilter(interaction_filter)
 
+    # A locked QDockWidget still reserves a native separator (16px on
+    # macOS). Top/bottom bars belong in the existing zero-spacing content
+    # layout so there is neither a resize strip nor a resize cursor.
+    if config.settings.dock_area in (
+        Qt.DockWidgetArea.TopDockWidgetArea,
+        Qt.DockWidgetArea.BottomDockWidgetArea,
+    ):
+        _progress_layout = mw.centralWidget().layout()
+        progressBar.ensurePolished()
+        progressBar.setFixedHeight(
+            progressBar.sizeHint().expandedTo(progressBar.minimumSizeHint()).height()
+        )
+        index = 0 if config.settings.dock_area == Qt.DockWidgetArea.TopDockWidgetArea else _progress_layout.count()
+        _progress_layout.insertWidget(index, progressBar)
+        mw.web.setFocus()
+        return
+
     dock = _dock(progressBar)
     progress_dock = dock
     if hasattr(mw, "docks") and dock not in getattr(mw, "docks", []):
@@ -371,9 +354,25 @@ def _dock(pb: QProgressBar) -> QDockWidget:
         making sure to set focus back to the reviewer."""
     dock = QDockWidget()
     tWidget = QWidget()
+    tWidget.setFixedSize(0, 0)
     dock.setObjectName("pbDock")
+    dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+    dock.toggleViewAction().setVisible(False)
     dock.setWidget(pb)
     dock.setTitleBarWidget(tWidget)
+
+    # A one-pixel difference between Qt's minimum and preferred bar height
+    # is enough to enable a dock resize handle. Fix only the dock's thickness
+    # to its styled content size; the bar still expands along its length.
+    pb.ensurePolished()
+    thickness = dock.sizeHint().expandedTo(dock.minimumSizeHint())
+    if config.settings.dock_area in (
+        Qt.DockWidgetArea.TopDockWidgetArea,
+        Qt.DockWidgetArea.BottomDockWidgetArea,
+    ):
+        dock.setFixedHeight(thickness.height())
+    else:
+        dock.setFixedWidth(thickness.width())
 
     existing_widgets = [widget for widget in mw.findChildren(QDockWidget) if mw.dockWidgetArea(widget) == config.settings.dock_area]
 
@@ -392,8 +391,6 @@ def _dock(pb: QProgressBar) -> QDockWidget:
 
         mw.splitDockWidget(existing_widgets[0], dock, stack_method)
 
-    if config.settings.active_theme.border_radius > 0 or config.settings.progress_bar_qstyle is not None:
-        mw.setPalette(config.settings.palette)
     mw.web.setFocus()
     return dock
 
@@ -402,6 +399,7 @@ def remove_progress_bar() -> None:
     """Tear down any existing progress bar dock."""
     global progressBar
     global progress_dock
+    global _progress_layout
     if progressBar is None and progress_dock is None:
         return
 
@@ -411,7 +409,11 @@ def remove_progress_bar() -> None:
         if hasattr(dock, "deleteLater"):
             dock.deleteLater()
     if progressBar is not None:
+        if _progress_layout is not None:
+            _progress_layout.removeWidget(progressBar)
+        progressBar.hide()
         progressBar.deleteLater()
+    _progress_layout = None
     progressBar = None
     progress_dock = None
 

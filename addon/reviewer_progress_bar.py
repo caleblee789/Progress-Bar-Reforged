@@ -324,7 +324,12 @@ def _ensure_persisted_progress_loaded() -> None:
         return
 
     if _progress_state.progress_restored and _progress_state.restored_day_stamp != today:
+        screen = _progress_state.main_window_state
+        deck_id = _progress_state.current_deck_id
         _prepare_counts_for_new_profile()
+        # A new study day clears metrics, but does not change Anki's screen.
+        _progress_state.main_window_state = screen
+        _progress_state.current_deck_id = deck_id
 
     if mw.pm is None or mw.col is None:
         return
@@ -1518,6 +1523,13 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
     _current_main_window_state = state
     _progress_state.main_window_state = state
 
+    # Navigation must stay current even while the bar is disabled or hidden.
+    if state in {"deckBrowser", "profileManager"}:
+        currDID = None
+    elif state in {"overview", "review"} and mw.col is not None:
+        currDID = mw.col.decks.current()['id']
+    _progress_state.current_deck_id = currDID
+
     if not settings.progress_bar_enabled:
         _remove_progress_bar()
         return
@@ -1527,8 +1539,6 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
             setScrollingPB()
         return
     elif state == "deckBrowser":
-        currDID = None
-        _progress_state.current_deck_id = None
         if not _should_show_progress_bar_for_state(state):
             _remove_progress_bar()
             return
@@ -1537,8 +1547,6 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
             initPB()
     elif state == "profileManager":
         _remove_progress_bar()
-        currDID = None
-        _progress_state.current_deck_id = None
         return
     else:  # "overview" or "review"
         if not _should_show_progress_bar_for_state(state):
@@ -1547,8 +1555,6 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
         # showInfo("mw.col.decks.current()['id'])= %d" % mw.col.decks.current()['id'])
         if not progress_ui.progressBar:
             initPB()
-        currDID = mw.col.decks.current()['id']
-        _progress_state.current_deck_id = currDID
 
     # showInfo("updateCountsForAllDecks(True), currDID = %d" % (currDID if currDID else 0))
     _ensure_persisted_progress_loaded()

@@ -195,8 +195,17 @@ class Qt:
 
 class QSize:
     def __init__(self, width: int, height: int) -> None:
-        self.width = width
-        self.height = height
+        self._width = width
+        self._height = height
+
+    def width(self) -> int:
+        return self._width
+
+    def height(self) -> int:
+        return self._height
+
+    def expandedTo(self, other: "QSize") -> "QSize":
+        return QSize(max(self.width(), other.width()), max(self.height(), other.height()))
 
 
 class QFont:
@@ -260,6 +269,9 @@ class QWidget:
 
     def setLayout(self, layout: Any) -> None:
         self._layout = layout
+
+    def layout(self):
+        return self._layout
 
     def setObjectName(self, name: str) -> None:
         self._object_name = name
@@ -354,6 +366,18 @@ class QWidget:
     def setFixedWidth(self, width: int) -> None:
         self._width = width
 
+    def setFixedHeight(self, height: int) -> None:
+        self._height = height
+
+    def ensurePolished(self) -> None:
+        pass
+
+    def sizeHint(self) -> QSize:
+        return QSize(100, 22)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(0, 21)
+
     def setFixedSize(self, width: int, height: int) -> None:
         self._width = width
         self._height = height
@@ -440,10 +464,23 @@ class QMenu(QWidget):
 
 
 class QDockWidget(QWidget):
+    class DockWidgetFeature:
+        NoDockWidgetFeatures = 0
+
     def __init__(self) -> None:
         super().__init__()
         self._widget: Optional[QWidget] = None
         self._title_bar_widget: Optional[QWidget] = None
+        self._toggle_action = QAction("")
+
+    def setFeatures(self, features) -> None:
+        self._features = features
+
+    def features(self):
+        return self._features
+
+    def toggleViewAction(self) -> QAction:
+        return self._toggle_action
 
     def setWidget(self, widget: QWidget) -> None:
         self._widget = widget
@@ -633,6 +670,15 @@ class QLayout:
 
     def addWidget(self, widget: QWidget, *args: Any) -> None:
         self.items.append(widget)
+
+    def insertWidget(self, index: int, widget: QWidget) -> None:
+        self.items.insert(index, widget)
+
+    def removeWidget(self, widget: QWidget) -> None:
+        self.items.remove(widget)
+
+    def count(self) -> int:
+        return len(self.items)
 
     def addLayout(self, layout: "QLayout", *args: Any) -> None:
         self.items.append(layout)
@@ -1340,6 +1386,11 @@ class MainWindowStub(QWidget):
         self.web = types.SimpleNamespace(setFocus=lambda: None)
         self.docks: List[QDockWidget] = []
         self.dock_areas: Dict[QDockWidget, int] = {}
+        self._central = QWidget()
+        self._central.setLayout(QVBoxLayout())
+
+    def centralWidget(self) -> QWidget:
+        return self._central
 
     def findChildren(self, klass=None) -> List[QWidget]:  # type: ignore[override]
         if klass is None:

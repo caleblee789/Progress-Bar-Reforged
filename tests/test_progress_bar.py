@@ -268,6 +268,10 @@ def test_malformed_config_is_repaired_without_stylesheet_injection(mw):
     assert "appearance must be an object; using defaults." in addon_config.validation_errors
     assert "segment_colors must be an object; using defaults." in addon_config.validation_errors
     assert addon_config._coerce_float("nan", 2.5) == 2.5
+    for value in (float("inf"), float("-inf"), float("nan")):
+        settings = addon_config.apply_config(mw, {"opacity": value, "max_width": value})
+        assert settings.opacity == 100
+        assert settings.max_width == ""
 
 
 def test_settings_cancel_and_apply_have_standard_persistence_semantics(addon_module):
@@ -1568,6 +1572,50 @@ def test_progress_bar_disabled_removes_for_any_display_location(addon_module):
     assert mod.progressBar is None
 
 
+def test_reenabling_bar_tracks_navigation_while_hidden(addon_module):
+    mod = addon_module
+    _prepare_state_change_counts(mod)
+    mod.afterStateChangeCallBack("review", "overview")
+    mod.toggleProgressBar()
+    mod.mw.col.decks.current = lambda: {"id": 2}
+    mod.afterStateChangeCallBack("overview", "review")
+    mod.afterStateChangeCallBack("review", "overview")
+    mod.toggleProgressBar()
+    assert mod.currDID == 2
+
+    mod.toggleProgressBar()
+    mod.afterStateChangeCallBack("deckBrowser", "review")
+    mod.addon_config.apply_config(mod.mw, {"display_location": "review_and_home"})
+    mod._apply_settings()
+    assert mod.currDID is None
+    assert mod.progressBar is not None
+
+    mod.afterStateChangeCallBack("overview", "deckBrowser")
+    mod.addon_config.apply_config(mod.mw, {"display_location": "review"})
+    mod._apply_settings()
+    mod.mw.col.decks.current = lambda: {"id": 3}
+    mod.afterStateChangeCallBack("overview", "deckBrowser")
+    mod.addon_config.apply_config(mod.mw, {"display_location": "review_and_home"})
+    mod._apply_settings()
+    assert mod.currDID == 3
+
+
+def test_bar_appearance_preserves_main_window_theme(addon_module):
+    mod = addon_module
+    from aqt.qt import QPalette
+
+    original_palette = QPalette()
+    original_style = "QMainWindow { color: blue; }"
+    mod.mw.setPalette(original_palette)
+    mod.mw.setStyleSheet(original_style)
+    mod._apply_config({"theme": "dark", "appearance": {"night": {"border_radius": 6}}})
+    mod.initPB()
+    mod.progress_ui.nmApplyStyle()
+    mod._remove_progress_bar()
+    assert mod.mw._palette is original_palette
+    assert mod.mw._style_sheet == original_style
+
+
 def test_settings_dialog_is_lightweight(addon_module):
     mod = addon_module
 
@@ -1637,7 +1685,7 @@ def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
     assert manifest["package"] == "1511983907"
     assert manifest["min_point_version"] == 49
     assert manifest["max_point_version"] == 260500
-    assert manifest["human_version"] == "1.1.3"
+    assert manifest["human_version"] == "1.1.4"
 
 
 def test_minimum_advertised_anki_version_uses_modern_gui_hooks(addon_module):
@@ -1732,6 +1780,9 @@ def test_smoke_progress_bar_initialization(addon_module):
     parent = mod.progressBar.parentWidget()
     assert parent is None or parent.objectName() == "pbDock"
     assert mod.progressBar._event_filters
+    assert mod.mw.docks == []
+    assert mod.mw.centralWidget().layout().items[0] is mod.progressBar
+    assert mod.progressBar.height() == mod.progressBar.sizeHint().height()
 
 
 def test_deck_breakdown_populates_rows(addon_module):
@@ -2199,11 +2250,16 @@ def test_day_rollover_discards_previous_day_snapshot_and_counts(addon_module):
     mod._ensure_persisted_progress_loaded()
     assert mod.totalCount == {1: 5.0}
 
+    mod._progress_state.main_window_state = "review"
+    mod._progress_state.current_deck_id = 1
+
     mod.mw.col.sched.day_cutoff = 3 * 86400
     mod._ensure_persisted_progress_loaded()
 
     assert mod.totalCount == {}
     assert mod.PERSISTED_PROGRESS_KEY not in mod.mw.pm.profile
+    assert mod._progress_state.main_window_state == "review"
+    assert mod._progress_state.current_deck_id == 1
 
 
 def test_profile_close_restores_before_writing_so_snapshot_is_not_erased(addon_module):
@@ -2239,6 +2295,7 @@ def test_profile_close_disposes_dialogs_and_progress_dock(addon_module):
 
     assert mod.progressBar is None
     assert mod.mw.docks == []
+    assert mod.mw.centralWidget().layout().count() == 0
     assert deck_dialog._closed is True
     assert history_dialog._closed is True
     assert mod._deck_breakdown_dialog is None

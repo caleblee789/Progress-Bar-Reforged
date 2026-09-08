@@ -1,9 +1,19 @@
 Progress Bar Reforged for Anki
 ===============================
 
-Progress Bar Reforged adds a dockable progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
+Progress Bar Reforged adds a progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
 
-Current release: **v1.1.3**. [Install from AnkiWeb](https://ankiweb.net/shared/info/1511983907) with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the [latest GitHub release](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+Current release: **v1.1.4**. [Install from AnkiWeb](https://ankiweb.net/shared/info/1511983907) with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the [latest GitHub release](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+
+What's new in v1.1.4
+--------------------
+
+* **Cleaner layout** - removes the strip that looked like a resize handle beneath the top/bottom bar.
+* **Reliable totals after toggling** - keeps the selected deck current while the bar is hidden.
+* **Smooth study-day rollover** - keeps the bar working when a new study day begins.
+* **Better compatibility** - preserves Anki's theme and handles malformed numeric settings safely.
+
+See the [v1.1.4 release notes](docs/releases/v1.1.4.md) for validation details.
 
 What's new in v1.1.3
 --------------------
@@ -45,7 +55,7 @@ Features
 Compatibility
 -------------
 
-The add-on is designed for Anki desktop 2.1.49 and newer. See the [release notes](docs/releases/v1.1.3.md) for the available testing coverage.
+The add-on is designed for Anki desktop 2.1.49 and newer. See the [release notes](docs/releases/v1.1.4.md) for the available testing coverage.
 
 Screenshots
 -----------
