@@ -462,17 +462,59 @@ def deck_breakdown_qss(tokens: ThemeTokens) -> str:
         QFrame#dashboardSummaryCard {{
             background: {tokens.summary_bg};
             border: 1px solid {tokens.summary_border};
+            border-radius: 12px;
+        }}
+        QFrame#breakdownTableCard {{
+            background: {tokens.card_bg};
+            border: 1px solid {tokens.card_border};
             border-radius: 8px;
         }}
         QFrame#breakdownToolbar {{
-            background: {tokens.advanced_bg};
-            border: 1px solid {tokens.card_border};
-            border-radius: 7px;
+            background: {tokens.card_bg};
+            border: none;
+        }}
+        QLabel#breakdownTableTitle {{
+            color: {tokens.secondary_text};
+            font-size: 18px;
+            font-weight: 700;
+        }}
+        QLabel#breakdownSortLabel {{
+            color: {tokens.secondary_text};
+            font-size: 14px;
+        }}
+        QCheckBox#breakdownHideEmpty {{
+            color: {tokens.secondary_text};
+            font-size: 12px;
+            spacing: 4px;
+        }}
+        QCheckBox#breakdownHideEmpty::indicator {{
+            width: 12px;
+            height: 12px;
         }}
         QLabel#dashboardTitle {{
             color: {tokens.summary_title_text};
-            font-size: 15px;
+            font-size: 16px;
             font-weight: 700;
+        }}
+        QLabel#dashboardDueValue {{
+            color: {tokens.summary_title_text};
+            font-size: 36px;
+            font-weight: 700;
+        }}
+        QLabel#dashboardSecondaryValue {{
+            color: {tokens.summary_title_text};
+            font-size: 20px;
+            font-weight: 700;
+        }}
+        QLabel#dashboardDueLabel {{
+            color: {tokens.secondary_text};
+            font-size: 17px;
+            font-weight: 500;
+        }}
+        QLabel#dashboardMetricLabel {{
+            color: {tokens.secondary_text};
+            font-size: 15px;
+            font-weight: 500;
         }}
         QLabel#dashboardMain {{
             color: {tokens.summary_text};
@@ -482,8 +524,8 @@ def deck_breakdown_qss(tokens: ThemeTokens) -> str:
             background: {tokens.card_bg};
             alternate-background-color: {tokens.table_alt_bg};
             color: {tokens.primary_text};
-            border: 1px solid {tokens.card_border};
-            border-radius: 6px;
+            border: none;
+            font-size: 15px;
         }}
         QTreeWidget QAbstractScrollArea::corner {{
             background: {tokens.card_bg};
@@ -491,7 +533,7 @@ def deck_breakdown_qss(tokens: ThemeTokens) -> str:
         }}
         QTreeWidget::item {{
             border: none;
-            padding: 5px 6px;
+            padding: 7px 6px;
         }}
         QTreeWidget::item:hover {{
             background: {tokens.table_hover_bg};
@@ -512,7 +554,8 @@ def deck_breakdown_qss(tokens: ThemeTokens) -> str:
             background: {tokens.tab_selected_bg};
             color: {tokens.tab_selected_text};
             border: 1px solid {tokens.tab_border};
-            padding: 5px 8px;
+            padding: 7px 8px;
+            font-size: 16px;
             font-weight: 700;
         }}
     """

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from copy import deepcopy
 from pathlib import Path
 from . import config as addon_config
+from .shared_addon_menu import install_shared_menu_footer
 from .config import (
     Settings,
     _coerce_bool,
@@ -204,10 +205,6 @@ def _get_caleb_addons_menu(menu_bar: Any):
 
 
 def _install_settings_menu_action() -> None:
-    existing = getattr(mw, "_progress_bar_settings_action", None)
-    if existing is not None:
-        return
-
     menu_bar = getattr(getattr(mw, "form", None), "menubar", None)
     if menu_bar is None:
         menu_bar_getter = getattr(mw, "menuBar", None)
@@ -216,6 +213,10 @@ def _install_settings_menu_action() -> None:
         return
 
     submenu = _get_caleb_addons_menu(menu_bar)
+    install_shared_menu_footer(submenu, mw, "1511983907")
+    existing = getattr(mw, "_progress_bar_settings_action", None)
+    if existing is not None:
+        return
     for action in _menu_actions(submenu):
         if isinstance(action, tuple) and len(action) >= 2:
             action = action[1]
@@ -617,12 +618,6 @@ def _pace_estimate_for_today(cards_today: int, seconds_today: float) -> Optional
     return None
 
 
-def _pace_projection_text(source: str) -> str:
-    if source == "today":
-        return "Projected time remaining based on today's pace."
-    return "Projected time remaining based on previous averages."
-
-
 def _format_duration(seconds: Optional[float], *, remaining: bool = False) -> str:
     """Format durations without confusing them with the wall-clock ETA."""
     if seconds is None:
@@ -916,9 +911,6 @@ def updatePB():
     actionable_new_total = sum(
         actionableNewCount.get(deck_id, 0) for deck_id in target_decks
     )
-    buried_rev_total = sum(buriedRevCount.get(deck_id, 0) for deck_id in target_decks)
-    buried_lrn_total = sum(buriedLrnCount.get(deck_id, 0) for deck_id in target_decks)
-    buried_new_total = sum(buriedNewCount.get(deck_id, 0) for deck_id in target_decks)
 
     actionable_left = (
         actionable_new_total + actionable_lrn_total + actionable_rev_total
@@ -944,15 +936,12 @@ def updatePB():
 
     pace_estimate = _pace_estimate_for_today(int(cards), float(thetime))
     if pace_estimate is not None:
-        pace_seconds_per_card, pace_source = pace_estimate
+        pace_seconds_per_card, _ = pace_estimate
         speed = 60.0 / pace_seconds_per_card
         seconds_remaining = int(round(var_diff * pace_seconds_per_card))
-        projection_text = _pace_projection_text(pace_source)
     else:
         speed = 0
         seconds_remaining = 0
-        pace_source = ""
-        projection_text = "Projected time remaining is unavailable until enough review history is available."
 
     # Daily goal tracking
     card_goal = max(0, settings.daily_target_cards)
@@ -961,24 +950,15 @@ def updatePB():
     cards_vs_goal = None
     time_vs_goal = None
     projected_minutes = None
-    projected_total_minutes = None
 
     if card_goal > 0:
         cards_vs_goal = (raw_done, card_goal)
-        remaining_cards_goal = max(0, card_goal - raw_done)
-    else:
-        remaining_cards_goal = None
 
     if minute_goal > 0:
         time_vs_goal = (elapsed_minutes, minute_goal)
-        remaining_minutes_goal = max(0.0, minute_goal - elapsed_minutes)
-    else:
-        remaining_minutes_goal = None
 
     if speed > 0:
         projected_minutes = seconds_remaining / 60.0
-        projected_total_minutes = elapsed_minutes + projected_minutes
-    pace_warning_messages: List[str] = []
 
     spent_display = _format_duration(thetime)
     # Keep second-rounded calculations and ETA intact. Format the positive
@@ -1009,26 +989,21 @@ def updatePB():
         progress_ui.progressBar.setRange(0, progress_max)
         progress_ui.progressBar.setValue(min(progress_value, progress_max))
 
-    warning_messages: List[str] = []
     warning_summary_parts: List[str] = []
     warning_active = False
     if settings.warnings_enabled:
         if settings.time_warning_minutes > 0 and seconds_remaining > settings.time_warning_minutes * 60:
             warning_active = True
-            warning_messages.append(f"Warning: projected time > {settings.time_warning_minutes}m.")
             warning_summary_parts.append(f"time>{settings.time_warning_minutes}m")
         if settings.again_warning_percent > 0 and again_value is not None and again_value >= settings.again_warning_percent:
             warning_active = True
-            warning_messages.append(f"Warning: Again rate ≥ {settings.again_warning_percent:.0f}%.")
             warning_summary_parts.append(f"Again≥{settings.again_warning_percent:.0f}%")
         if settings.retention_warning_percent > 0:
             if temp_value is not None and temp_value < settings.retention_warning_percent:
                 warning_active = True
-                warning_messages.append(f"Warning: true retention < {settings.retention_warning_percent:.0f}%.")
                 warning_summary_parts.append(f"Retention<{settings.retention_warning_percent:.0f}%")
             if temp_supermature_value is not None and temp_supermature_value < settings.retention_warning_percent:
                 warning_active = True
-                warning_messages.append(f"Warning: super-mature retention < {settings.retention_warning_percent:.0f}%.")
                 warning_summary_parts.append(f"Super-mature retention<{settings.retention_warning_percent:.0f}%")
 
     projected_finish_after_cutoff: Optional[int] = None
@@ -1042,17 +1017,13 @@ def updatePB():
                 projected_cards = done_cards + (seconds_remaining * speed / 60)
                 if projected_cards + 1e-6 < goal_cards:
                     warning_active = True
-                    pace_warning_messages.append("Warning: projected cards will miss the goal.")
                     warning_summary_parts.append("Cards<goal")
         if time_vs_goal is not None and projected_minutes is not None and minute_goal > 0:
             if elapsed_minutes + projected_minutes < minute_goal - 1e-6:
                 warning_active = True
-                pace_warning_messages.append("Warning: projected time below target minutes.")
                 warning_summary_parts.append("Time<goal")
         if projected_finish_after_cutoff is not None and projected_finish_after_cutoff > 0:
             warning_active = True
-            minutes_past = projected_finish_after_cutoff / 60.0
-            pace_warning_messages.append(f"Warning: projected finish {minutes_past:.0f}m after today's cutoff.")
             warning_summary_parts.append("ETA>cutoff")
 
 
@@ -1064,247 +1035,67 @@ def updatePB():
         "The percentage uses completed answers and cards left. "
         "Repeat answers count separately."
     )
-    tooltip_lines: List[str] = [progress_explanation]
-    completed_tooltip_lines: List[str] = [progress_explanation]
-    remaining_tooltip_lines: List[str] = [progress_explanation]
     progress_ui.progressBar.setAccessibleDescription(
         f"{raw_done} completed answers, {var_diff} cards left, {percent:.0f}% by count. "
         + progress_explanation + " Press Enter or Space to open the deck breakdown."
     )
 
     goal_text_parts: List[str] = []
-    goal_tooltip_lines: List[str] = []
-
     if cards_vs_goal is not None:
         done_cards, goal_cards = cards_vs_goal
         progress_pct = 100.0 if goal_cards == 0 else min(100.0, (done_cards / goal_cards) * 100)
         goal_text_parts.append(f"Cards {done_cards}/{goal_cards} ({progress_pct:.0f}%)")
-        goal_tooltip_lines.append(
-            f"Card goal: {done_cards}/{goal_cards} cards ({progress_pct:.0f}% complete)."
-        )
-        if remaining_cards_goal is not None:
-            goal_tooltip_lines.append(f"Cards remaining to goal: {remaining_cards_goal}.")
 
     if time_vs_goal is not None:
         elapsed, goal_minutes = time_vs_goal
         progress_pct = 100.0 if goal_minutes == 0 else min(100.0, (elapsed / goal_minutes) * 100)
         goal_text_parts.append(f"Time {elapsed:.0f}/{goal_minutes}m ({progress_pct:.0f}%)")
-        goal_tooltip_lines.append(
-            f"Time goal: {elapsed:.0f}/{goal_minutes} minutes ({progress_pct:.0f}% complete)."
-        )
-        if remaining_minutes_goal is not None:
-            goal_tooltip_lines.append(f"Minutes remaining to goal: {remaining_minutes_goal:.0f}.")
-        if projected_total_minutes is not None:
-            pace_label = "today's pace" if pace_source == "today" else "previous averages"
-            goal_tooltip_lines.append(f"Projected total time using {pace_label}: {projected_total_minutes:.0f} minutes.")
-
-    if projected_finish_after_cutoff is not None and cutoff_seconds > 0:
-        cutoff_delta_minutes = projected_finish_after_cutoff / 60.0
-        if projected_finish_after_cutoff > 0:
-            goal_tooltip_lines.append(f"Projected to finish {cutoff_delta_minutes:.0f} minutes after today's cutoff.")
-        else:
-            goal_tooltip_lines.append(f"Projected to finish {abs(cutoff_delta_minutes):.0f} minutes before today's cutoff.")
 
     mode = getattr(settings, "mode", "stats")
     if mode == "simple":
         output = f"{raw_done}/{raw_total} ({percent:.0f}%)" if settings.show_percent else f"{raw_done}/{raw_total}"
-        tooltip_lines.append(
-            f"Cards completed: {raw_done} ({percent:.02f}% of today's total)."
-        )
-        tooltip_lines.append(
-            f"Cards remaining: {var_diff:.0f} ({percentdiff:.02f}% of today's session)."
-        )
-        completed_tooltip_lines.append(
-            f"Cards completed: {raw_done} ({percent:.02f}% of today's total)."
-        )
-        remaining_tooltip_lines.append(
-            f"Cards remaining: {var_diff:.0f} ({percentdiff:.02f}% of today's session)."
-        )
     elif mode == "time_left":
         output = f"{raw_done}/{raw_total} ({percent:.0f}%)" if settings.show_percent else f"{raw_done}/{raw_total}"
         output += f"     |     {var_diff:.0f} left"
         output += f"     |     {spent_display} spent"
-        tooltip_lines.append(
-            f"Cards completed: {raw_done} ({percent:.02f}% of today's total)."
-        )
-        tooltip_lines.append(
-            f"Cards remaining: {var_diff:.0f} ({percentdiff:.02f}% of today's session)."
-        )
-        tooltip_lines.append(
-            f"Time spent reviewing so far today: {spent_display}."
-        )
-        completed_tooltip_lines.append(
-            f"Cards completed: {raw_done} ({percent:.02f}% of today's total)."
-        )
-        completed_tooltip_lines.append(
-            f"Time spent reviewing so far today: {spent_display}."
-        )
-        remaining_tooltip_lines.append(
-            f"Cards remaining: {var_diff:.0f} ({percentdiff:.02f}% of today's session)."
-        )
     elif settings.show_number:
-        base_displayed = True
         if settings.show_percent:
             output = f"{raw_done} ({percent:.02f}%) done"
-            tooltip_lines.append(
-                f"Cards completed: {raw_done} ({percent:.02f}% of today's total)."
-            )
-            completed_tooltip_lines.append(
-                f"Cards completed: {raw_done} ({percent:.02f}% of today's total)."
-            )
             output += f"     |     {var_diff:.0f} ({percentdiff:.02f}%) left"
-            tooltip_lines.append(
-                f"Cards remaining: {var_diff:.0f} ({percentdiff:.02f}% of today's session)."
-            )
-            remaining_tooltip_lines.append(
-                f"Cards remaining: {var_diff:.0f} ({percentdiff:.02f}% of today's session)."
-            )
         else:
             output = f"{raw_done} done"
-            tooltip_lines.append(f"Cards completed so far today: {raw_done}.")
             output += f"     |     {var_diff:.0f} left"
-            tooltip_lines.append(f"Cards remaining in the active queues: {var_diff:.0f}.")
-            completed_tooltip_lines.append(f"Cards completed so far today: {raw_done}.")
-            remaining_tooltip_lines.append(
-                f"Cards remaining in the active queues: {var_diff:.0f}."
-            )
         if settings.show_yesterday:
             output += f"     |     {secspeed_display} ({ysecspeed_display}) s/card"
-            tooltip_lines.append(
-                "Seconds per card today (yesterday in parentheses)."
-            )
-            completed_tooltip_lines.append(
-                "Seconds per card today (yesterday in parentheses)."
-            )
         else:
             output += f"     |     {secspeed_display} s/card"
-            tooltip_lines.append(
-                "Average seconds spent per card for the current session."
-            )
-            completed_tooltip_lines.append(
-                "Average seconds spent per card for the current session."
-            )
         if settings.show_again:
             if settings.show_yesterday:
                 output += f"     |     {again} ({y_again}) Again"
-                tooltip_lines.append(
-                    "Again answers today (yesterday in parentheses)."
-                )
-                completed_tooltip_lines.append(
-                    "Again answers today (yesterday in parentheses)."
-                )
             else:
                 output += f"     |     {again} Again"
-                tooltip_lines.append("Again answers given during today's reviews.")
-                completed_tooltip_lines.append(
-                    "Again answers given during today's reviews."
-                )
         if settings.show_retention:
             if settings.show_yesterday:
                 output += f"     |     {temp} ({ytemp}) Retention"
-                tooltip_lines.append(
-                    "Today's true retention percentage (yesterday in parentheses)."
-                )
-                completed_tooltip_lines.append(
-                    "Today's true retention percentage (yesterday in parentheses)."
-                )
             else:
                 output += f"     |     {temp} Retention"
-                tooltip_lines.append("Today's true retention percentage.")
-                completed_tooltip_lines.append("Today's true retention percentage.")
         if settings.show_super_mature_retention:
             if settings.show_yesterday:
                 output += f"     |     {temp_supermature} ({ytemp_supermature}) SMTR"
-                tooltip_lines.append(
-                    "Super-mature retention rate today (yesterday in parentheses)."
-                )
-                completed_tooltip_lines.append(
-                    "Super-mature retention rate today (yesterday in parentheses)."
-                )
             else:
                 output += f"     |     {temp_supermature} SMTR"
-                tooltip_lines.append("Super-mature retention rate for today's reviews.")
-                completed_tooltip_lines.append(
-                    "Super-mature retention rate for today's reviews."
-                )
         output += f"     |     {spent_display} spent"
-        tooltip_lines.append(
-            f"Time spent reviewing so far today: {spent_display}."
-        )
-        completed_tooltip_lines.append(
-            f"Time spent reviewing so far today: {spent_display}."
-        )
         if goal_text_parts:
             output += "     |     Goals " + " · ".join(goal_text_parts)
         if settings.show_debug:
             output += f"     |     {new_weight:.02f} New Weight"
-            tooltip_lines.append(
-                f"Weight applied to new cards when calculating progress: {new_weight:.02f}."
-            )
-            completed_tooltip_lines.append(
-                f"Weight applied to new cards when calculating progress: {new_weight:.02f}."
-            )
             output += f"     |     {lrn_weight:.02f} Lrn Weight"
-            tooltip_lines.append(
-                f"Weight applied to learning cards in the progress formula: {lrn_weight:.02f}."
-            )
-            completed_tooltip_lines.append(
-                f"Weight applied to learning cards in the progress formula: {lrn_weight:.02f}."
-            )
             output += f"     |     {rev_weight:.02f} Rev Weight"
-            tooltip_lines.append(
-                f"Weight applied to review cards in the progress formula: {rev_weight:.02f}."
-            )
-            completed_tooltip_lines.append(
-                f"Weight applied to review cards in the progress formula: {rev_weight:.02f}."
-            )
     else:
         output = "Goals " + " · ".join(goal_text_parts) if goal_text_parts else ""
 
     if mode != "simple":
         output += f"     |     {remaining_display} remaining     |     ETA {eta_display}"
-        remaining_details = [f"{remaining_display} remaining."]
-        if var_diff == 0:
-            remaining_details.append("No actionable cards remain.")
-        elif pace_estimate is None:
-            remaining_details.append(projection_text)
-            remaining_details.append("Estimated finish time unavailable until enough review history or today's pace is available.")
-        else:
-            remaining_details.append(projection_text)
-            remaining_details.append(
-                f"Estimated finish time adjusted for your {'system' if settings.use_system_timezone else 'custom'} timezone: {eta_display}."
-            )
-        tooltip_lines.extend(remaining_details)
-        remaining_tooltip_lines.extend(remaining_details)
-        # The full label remains available whichever part of a shortened bar
-        # is hovered; the existing region-specific explanations follow it.
-        full_details = output.replace("     |     ", " | ")
-        for lines in (tooltip_lines, completed_tooltip_lines, remaining_tooltip_lines):
-            lines.insert(0, full_details)
-
-    if goal_tooltip_lines:
-        tooltip_lines.extend(goal_tooltip_lines)
-        completed_tooltip_lines.extend(goal_tooltip_lines)
-        remaining_tooltip_lines.extend(goal_tooltip_lines)
-
-    def _format_breakdown(label: str, actionable: int, buried: int) -> str:
-        if buried:
-            return f"{label}: {actionable} + {buried}"
-        return f"{label}: {actionable} +0"
-
-    breakdown_lines = [
-        _format_breakdown("New", actionable_new_total, buried_new_total),
-        _format_breakdown("Learning", actionable_lrn_total, buried_lrn_total),
-        _format_breakdown("To Review", actionable_rev_total, buried_rev_total),
-    ]
-    tooltip_lines.extend(breakdown_lines)
-    tooltip_lines.append(
-        "Cards left matches Anki's active reviewer queue; + shows cards already buried or hidden by sibling burying."
-    )
-    remaining_tooltip_lines.extend(breakdown_lines)
-    remaining_tooltip_lines.append(
-        "Cards left matches Anki's active reviewer queue; + shows cards already buried or hidden by sibling burying."
-    )
 
     warning_summary_text: Optional[str] = None
     if settings.warnings_enabled or settings.pace_warnings_enabled:
@@ -1312,28 +1103,7 @@ def updatePB():
             warning_summary_text = f"Warnings: {', '.join(warning_summary_parts)}"
         else:
             warning_summary_text = "Warnings: None active"
-        tooltip_lines.append(warning_summary_text + ".")
-        completed_tooltip_lines.append(warning_summary_text + ".")
-        remaining_tooltip_lines.append(warning_summary_text + ".")
 
-    all_warning_messages = warning_messages + pace_warning_messages
-    if all_warning_messages:
-        tooltip_lines.append("")
-        tooltip_lines.extend(all_warning_messages)
-        completed_tooltip_lines.append("")
-        completed_tooltip_lines.extend(all_warning_messages)
-        remaining_tooltip_lines.append("")
-        remaining_tooltip_lines.extend(all_warning_messages)
-
-    if tooltip_lines:
-        default_tooltip = "\n".join(tooltip_lines)
-    else:
-        default_tooltip = (
-            "Progress metrics are hidden. Enable numbers in the add-on settings to view details."
-        )
-
-    completed_tooltip = "\n".join(completed_tooltip_lines) if completed_tooltip_lines else default_tooltip
-    remaining_tooltip = "\n".join(remaining_tooltip_lines) if remaining_tooltip_lines else default_tooltip
     progress_fraction = 1.0
     if progress_max > 0:
         progress_fraction = min(1.0, max(0.0, progress_value / progress_max))
@@ -1372,12 +1142,7 @@ def updatePB():
         progress_ui.apply_bar_style(warning_active)
         _warning_active = warning_active
 
-    progress_ui.update_progress_tooltips(
-        default_tooltip,
-        completed_text=completed_tooltip,
-        remaining_text=remaining_tooltip,
-        fraction=progress_fraction,
-    )
+    progress_ui.update_progress_tooltip()
 
     _progress_state.last_cards_per_minute = speed if speed > 0 else None
     _update_breakdown_rows(target_nodes, _progress_state.last_cards_per_minute)
@@ -2153,11 +1918,6 @@ class ShortcutField(QWidget):
         return bool(self._last_conflict)
 
 
-BREAKDOWN_INFO_TEXT = (
-    "In review, due today matches Anki's active card queue and excludes cards hidden by "
-    "sibling burying. Buried includes cards already buried plus due siblings Anki will hide. "
-    "ETAs use today's pace after 5 cards or previous averages before then."
-)
 _ETA_SORT_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*([AP]M)(?:\+(\d+))?$", re.IGNORECASE)
 
 
@@ -2534,8 +2294,8 @@ class _DashboardSummaryCard(QFrame):
         if frame_shape is not None:
             self.setFrameShape(frame_shape)
         layout = QVBoxLayout()
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(5)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(9)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -2545,29 +2305,53 @@ class _DashboardSummaryCard(QFrame):
         self._title_label.setObjectName("dashboardTitle")
         self._title_label.setWordWrap(False)
 
-        self._info_btn = QToolButton()
-        self._info_btn.setText("i")
-        self._info_btn.setAutoRaise(True)
-        self._info_btn.setToolTip(BREAKDOWN_INFO_TEXT)
-        self._info_btn.setAccessibleName("About counts")
-        self._info_btn.setAccessibleDescription(BREAKDOWN_INFO_TEXT)
-
-        self._copy_btn = QToolButton()
-        self._copy_btn.setText("Copy")
-        self._copy_btn.setToolTip("Copy workload summary")
-        self._copy_btn.setAccessibleName("Copy workload summary")
-        self._copy_btn.clicked.connect(self._copy_summary)
-
         header.addWidget(self._title_label)
         header.addStretch(1)
-        header.addWidget(self._info_btn)
-        header.addWidget(self._copy_btn)
         layout.addLayout(header)
+
+        metrics = QHBoxLayout()
+        metrics.setContentsMargins(0, 0, 0, 0)
+        metrics.setSpacing(18)
+
+        due_group = QHBoxLayout()
+        due_group.setSpacing(12)
+        self._due_value = QLabel("0")
+        self._due_value.setObjectName("dashboardDueValue")
+        due_label = QLabel("cards due today")
+        due_label.setObjectName("dashboardDueLabel")
+        due_group.addWidget(self._due_value)
+        due_group.addWidget(due_label)
+        due_group.addStretch(1)
+
+        buried_group = QHBoxLayout()
+        buried_group.setSpacing(7)
+        self._buried_value = QLabel("0")
+        self._buried_value.setObjectName("dashboardSecondaryValue")
+        buried_label = QLabel("cards buried")
+        buried_label.setObjectName("dashboardMetricLabel")
+        buried_group.addWidget(self._buried_value)
+        buried_group.addWidget(buried_label)
+        buried_group.addStretch(1)
+
+        eta_group = QHBoxLayout()
+        eta_group.setSpacing(7)
+        self._eta_value = QLabel("No ETA yet")
+        self._eta_value.setObjectName("dashboardSecondaryValue")
+        eta_label = QLabel("finish estimate")
+        eta_label.setObjectName("dashboardMetricLabel")
+        eta_group.addWidget(self._eta_value)
+        eta_group.addWidget(eta_label)
+        eta_group.addStretch(1)
+
+        metrics.addLayout(due_group, 4)
+        metrics.addLayout(buried_group, 2)
+        metrics.addLayout(eta_group, 3)
+        layout.addLayout(metrics)
 
         self._main_label = QLabel("")
         self._main_label.setObjectName("dashboardMain")
         self._main_label.setWordWrap(True)
-        layout.addWidget(self._main_label)
+        self._main_label.setVisible(False)
 
         self._segment_bar = _WorkloadSegmentBar(self._palette)
         layout.addWidget(self._segment_bar)
@@ -2609,8 +2393,13 @@ class _DashboardSummaryCard(QFrame):
         self._summary = dict(summary)
         self._title_label.setText(str(summary.get("title", "Today")))
         self._main_label.setText(str(summary.get("main", _format_summary_main(summary))))
+        if hasattr(self, "setAccessibleDescription"):
+            self.setAccessibleDescription(self._main_label.text())
 
         new, lrn, rev = _normalize_counts(summary.get("actionable", (0, 0, 0)))
+        self._due_value.setText(str(new + lrn + rev))
+        self._buried_value.setText(str(_count_total(summary.get("buried", (0, 0, 0)))))
+        self._eta_value.setText(_summary_finish_display(str(summary.get("eta", "N/A") or "N/A")))
         chip_values = {
             "new": ("New", new),
             "learning": ("Learning", lrn),
@@ -2622,21 +2411,6 @@ class _DashboardSummaryCard(QFrame):
             chip.setStyleSheet(self._chip_style(key, active=value > 0))
         self._segment_bar.set_counts((new, lrn, rev))
         self.setToolTip("")
-
-    def _copy_summary(self) -> None:
-        text = str(self._summary.get("clipboard") or _format_summary_clipboard(self._summary))
-        copied = False
-        app_cls = globals().get("QApplication")
-        if app_cls is not None:
-            try:
-                clipboard = app_cls.clipboard()
-                clipboard.setText(text)
-                copied = True
-            except Exception:
-                copied = False
-        if not copied:
-            setattr(mw, "_last_clipboard_text", text)
-
 
 try:
     _StyledItemDelegateBase = QStyledItemDelegate
@@ -2652,8 +2426,8 @@ except NameError:  # pragma: no cover - only used if Qt omits the delegate in te
             return QSize(170, 30)
 
 
-_COUNT_CELL_MIN_WIDTH = 190
-_COUNT_CELL_MIN_HEIGHT = 30
+_COUNT_CELL_MIN_WIDTH = 210
+_COUNT_CELL_MIN_HEIGHT = 36
 _BREAKDOWN_DIALOG_MIN_WIDTH = 850
 _BREAKDOWN_DIALOG_MAX_WIDTH = 950
 _BREAKDOWN_DIALOG_FRAME_WIDTH = 32
@@ -2661,9 +2435,9 @@ _BREAKDOWN_DIALOG_SCREEN_MARGIN = 80
 _BREAKDOWN_DIALOG_DEFAULT_HEIGHT = 560
 _BREAKDOWN_COLUMN_WIDTH_BOUNDS = {
     0: (250, 420),
-    1: (190, 250),
-    2: (190, 240),
-    3: (100, 130),
+    1: (210, 270),
+    2: (210, 250),
+    3: (110, 140),
 }
 
 
@@ -2771,7 +2545,7 @@ class _CountBreakdownDelegate(_StyledItemDelegateBase):
 
             total_width = total_metrics.horizontalAdvance(total_text) if hasattr(total_metrics, "horizontalAdvance") else total_metrics.width(total_text)
             x_pos = rect.left() + total_width + 18
-            chip_height = min(20, max(16, rect.height() - 2))
+            chip_height = min(22, max(18, rect.height() - 2))
             chip_top = rect.top() + max(0, (rect.height() - chip_height) // 2)
 
             if font_cls is not None:
@@ -2821,6 +2595,7 @@ class DeckBreakdownDialog(QDialog):
         self._header_view_cls = None
         self._summary_card = None
         self._count_delegate = None
+        self._table_card = None
         self._toolbar = None
         self._hide_empty_cb = None
         self._sort_combo = None
@@ -2861,31 +2636,44 @@ class DeckBreakdownDialog(QDialog):
         self._summary_card = _DashboardSummaryCard(palette)
         layout.addWidget(self._summary_card)
 
+        self._table_card = QFrame()
+        self._table_card.setObjectName("breakdownTableCard")
+        table_layout = QVBoxLayout()
+        table_layout.setContentsMargins(1, 1, 1, 1)
+        table_layout.setSpacing(0)
+
         self._toolbar = QFrame()
         self._toolbar.setObjectName("breakdownToolbar")
         controls = QHBoxLayout()
         controls.setContentsMargins(10, 6, 10, 6)
         controls.setSpacing(8)
 
+        table_title = QLabel("Deck workload")
+        table_title.setObjectName("breakdownTableTitle")
+
         self._hide_empty_cb = QCheckBox("Hide empty")
+        self._hide_empty_cb.setObjectName("breakdownHideEmpty")
         self._hide_empty_cb.setToolTip("Hide decks with no actionable or buried cards unless a child deck has work.")
         self._hide_empty_cb.setChecked(True)
         self._hide_empty_cb.toggled.connect(self._on_hide_empty_changed)
 
         sort_label = QLabel("Sort")
+        sort_label.setObjectName("breakdownSortLabel")
         self._sort_combo = QComboBox()
         self._sort_combo.addItem("Deck order", "deck")
         self._sort_combo.addItem("Most due today", "actionable")
         self._sort_combo.addItem("Soonest ETA", "eta")
+        self._sort_combo.setMinimumWidth(190)
         self._sort_combo.setToolTip("Sort visible sibling decks without changing deck data.")
         self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
 
-        controls.addWidget(self._hide_empty_cb)
+        controls.addWidget(table_title)
         controls.addStretch(1)
         controls.addWidget(sort_label)
         controls.addWidget(self._sort_combo)
+        controls.addWidget(self._hide_empty_cb)
         self._toolbar.setLayout(controls)
-        layout.addWidget(self._toolbar)
+        table_layout.addWidget(self._toolbar)
 
         self._tree = QTreeWidget()
         self._tree.setAccessibleName("Deck workload breakdown")
@@ -2922,7 +2710,9 @@ class DeckBreakdownDialog(QDialog):
             self._tree.setItemDelegateForColumn(1, self._count_delegate)
             self._tree.setItemDelegateForColumn(2, self._count_delegate)
 
-        layout.addWidget(self._tree)
+        table_layout.addWidget(self._tree, 1)
+        self._table_card.setLayout(table_layout)
+        layout.addWidget(self._table_card, 1)
 
         self.setLayout(layout)
         self.apply_theme()
@@ -2936,7 +2726,10 @@ class DeckBreakdownDialog(QDialog):
         if self._tree is not None:
             self._tree.setStyleSheet(qss)
         if self._sort_combo is not None:
-            self._sort_combo.setStyleSheet(combo_qss(self._theme_tokens))
+            self._sort_combo.setStyleSheet(
+                combo_qss(self._theme_tokens)
+                + "QComboBox, QComboBox QAbstractItemView { font-size: 14px; }"
+            )
         if self._summary_card is not None:
             self._summary_card.apply_theme(self._palette)
         if self._count_delegate is not None:

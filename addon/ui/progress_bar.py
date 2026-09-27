@@ -7,7 +7,6 @@ from aqt.qt import (
     QColor,
     QDockWidget,
     QEvent,
-    QHelpEvent,
     QObject,
     QPainter,
     QProgressBar,
@@ -16,7 +15,6 @@ from aqt.qt import (
     QStyle,
     QStyleOptionProgressBar,
     QStylePainter,
-    QToolTip,
     Qt,
     QKeySequence,
     QWidget,
@@ -31,78 +29,17 @@ progressBar: Optional[QProgressBar] = None
 progress_dock: Optional[QDockWidget] = None
 _progress_layout = None
 toggle_shortcut: Optional[QShortcut] = None
-progress_tooltip_filter: Optional[QObject] = None
 interaction_filter: Optional[QObject] = None
 _click_handler = None
 _label_refresh_handler = None
-_progress_segment_tooltips: Dict[str, str] = {}
-_progress_fraction: float = 0.0
-_default_tooltip_text: str = ""
-PROGRESS_BAR_TOOLTIP_HINT = "Click for full Deck Breakdown."
+PROGRESS_BAR_TOOLTIP_HINT = "Click for Deck Breakdown."
 
 
-def _update_progress_tooltips(
-    default_text: str,
-    completed_text: Optional[str] = None,
-    remaining_text: Optional[str] = None,
-    fraction: Optional[float] = None,
-) -> None:
-    """Store tooltip variants for different hover regions of the bar."""
-    global _progress_segment_tooltips
-    global _progress_fraction
-    global _default_tooltip_text
-
-    tooltips_enabled = config.settings is None or config.settings.tooltip_enabled
-    if not tooltips_enabled:
-        _default_tooltip_text = ""
-        _progress_segment_tooltips = {"completed": "", "remaining": ""}
-        if progressBar is not None:
-            progressBar.setToolTip("")
-        return
-
-    def with_hint(text: Optional[str]) -> str:
-        content = (text or "").strip()
-        return f"{content}\n\n{PROGRESS_BAR_TOOLTIP_HINT}" if content else PROGRESS_BAR_TOOLTIP_HINT
-
-    _default_tooltip_text = with_hint(default_text)
-    _progress_segment_tooltips = {
-        "completed": with_hint(completed_text or default_text),
-        "remaining": with_hint(remaining_text or default_text),
-    }
-    if fraction is not None:
-        _progress_fraction = max(0.0, min(1.0, fraction))
-
+def update_progress_tooltip() -> None:
+    """Keep the hover hint short regardless of the displayed metrics."""
     if progressBar is not None:
-        progressBar.setToolTip(_default_tooltip_text)
-
-
-def _on_progress_bar_tooltip(event: QHelpEvent) -> bool:
-    """Show context-aware tooltips based on the hovered portion of the bar."""
-    if progressBar is None or not _default_tooltip_text:
-        return False
-
-    try:
-        pos = event.position()  # Qt6
-    except AttributeError:
-        pos = event.pos()  # Qt5 fallback
-
-    bar_width = max(1, progressBar.width())
-    hover_ratio = max(0.0, min(1.0, pos.x() / bar_width))
-    tooltip_text = _default_tooltip_text
-    if _progress_fraction > 0 and hover_ratio <= _progress_fraction:
-        tooltip_text = _progress_segment_tooltips.get("completed", _default_tooltip_text)
-    elif _progress_fraction < 1 and hover_ratio > _progress_fraction:
-        tooltip_text = _progress_segment_tooltips.get("remaining", _default_tooltip_text)
-
-    QToolTip.showText(event.globalPos(), tooltip_text, progressBar)
-    return True
-
-
-class _ProgressBarTooltipFilter(QObject):
-    def eventFilter(self, obj, event) -> bool:
-        if obj is progressBar and event.type() == QEvent.Type.ToolTip:
-            return _on_progress_bar_tooltip(event)
-        return False
+        enabled = config.settings is None or config.settings.tooltip_enabled
+        progressBar.setToolTip(PROGRESS_BAR_TOOLTIP_HINT if enabled else "")
 
 
 class _ProgressBarInteractionFilter(QObject):
@@ -291,7 +228,6 @@ def nmApplyStyle() -> None:
 def init_progress_bar() -> None:
     """Initialize and set parameters for progress bar, adding it to the dock."""
     global progressBar
-    global progress_tooltip_filter
     global interaction_filter
     global progress_dock
     global _progress_layout
@@ -309,11 +245,8 @@ def init_progress_bar() -> None:
     progressBar.setAccessibleDescription(
         "Shows current review progress. Press Enter or Space to open the deck breakdown."
     )
+    update_progress_tooltip()
     apply_bar_style(False)
-
-    if progress_tooltip_filter is None:
-        progress_tooltip_filter = _ProgressBarTooltipFilter()
-    progressBar.installEventFilter(progress_tooltip_filter)
 
     if interaction_filter is None:
         interaction_filter = _ProgressBarInteractionFilter()
@@ -437,24 +370,8 @@ def set_scrolling_bar_state() -> None:
     progressBar.setRange(0, 0)
     if config.settings.show_number:
         progressBar.setFormat("Waiting...")
-        waiting_tooltip = (
-            "Anki is updating the collection. Progress stats will resume once reviews restart."
-        )
-    else:
-        waiting_tooltip = (
-            "Anki is updating the collection. Enable progress text to view detailed statistics."
-        )
-    _update_progress_tooltips(waiting_tooltip)
+    update_progress_tooltip()
     nmApplyStyle()
-
-
-def update_progress_tooltips(
-    default_text: str,
-    completed_text: Optional[str] = None,
-    remaining_text: Optional[str] = None,
-    fraction: Optional[float] = None,
-) -> None:
-    _update_progress_tooltips(default_text, completed_text, remaining_text, fraction)
 
 
 def update_toggle_shortcut(on_toggle) -> None:
@@ -491,6 +408,6 @@ __all__ = [
     "remove_progress_bar",
     "set_scrolling_bar_state",
     "set_click_handler",
-    "update_progress_tooltips",
+    "update_progress_tooltip",
     "update_toggle_shortcut",
 ]

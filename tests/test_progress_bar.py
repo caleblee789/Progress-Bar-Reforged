@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, List, Sequence, Tuple
 
+import pytest
+
 from tests.stubs import QApplication, DeckNode, QFileDialog, QPainter, QPalette, QRect
 
 
@@ -1164,7 +1166,6 @@ def test_eta_uses_history_before_any_cards_today(addon_module):
     assert round(mod._last_cards_per_minute, 3) == 6.0
     assert "ETA " in mod.progressBar.format()
     assert "ETA N/A" not in mod.progressBar.format()
-    assert "previous averages" in mod.progressBar.toolTip()
     assert "2m remaining" in mod.progressBar.format()
     assert "0m spent" in mod.progressBar.format()
     assert mod._latest_breakdown_rows[0]["eta"] != "N/A"
@@ -1180,7 +1181,6 @@ def test_eta_uses_history_until_five_cards_today(addon_module):
     )
 
     assert round(mod._last_cards_per_minute, 3) == 6.0
-    assert "previous averages" in mod.progressBar.toolTip()
 
 
 def test_eta_uses_today_pace_after_five_cards(addon_module):
@@ -1193,7 +1193,6 @@ def test_eta_uses_today_pace_after_five_cards(addon_module):
     )
 
     assert round(mod._last_cards_per_minute, 3) == 3.0
-    assert "today's pace" in mod.progressBar.toolTip()
 
 
 def test_time_labels_distinguish_unavailable_completed_and_subminute_estimates(addon_module):
@@ -1215,10 +1214,8 @@ def test_time_labels_distinguish_unavailable_completed_and_subminute_estimates(a
                 config={"mode": mode},
             )
             assert expected in mod.progressBar.format()
-            assert expected in mod.progressBar.toolTip()
             if expected.startswith("N/A"):
                 assert mod._last_cards_per_minute is None
-                assert "enough review history" in mod.progressBar.toolTip()
             # Tiny estimates keep the existing second-rounded ETA behavior.
             assert "ETA N/A" in mod.progressBar.format()
             assert mod._latest_breakdown_rows[0]["eta"] == "N/A"
@@ -1518,37 +1515,28 @@ def test_progress_bar_keyboard_activation_and_accessibility(addon_module):
     assert calls == ["opened", "opened"]
 
 
-def test_progress_bar_tooltip_includes_deck_breakdown_hint(addon_module):
+@pytest.mark.parametrize("mode", ("simple", "stats"))
+def test_progress_bar_tooltip_is_short_deck_breakdown_hint(addon_module, mode):
     from addon.ui import progress_bar as progress_ui
-    from tests.stubs import QHelpEvent, QToolTip
 
     mod = addon_module
-    setup_progress_update(mod)
+    setup_progress_update(mod, {"mode": mode})
 
-    assert "Click for full Deck Breakdown." in progress_ui.progressBar.toolTip()
-    assert "Cards completed:" in progress_ui.progressBar.toolTip()
-
-    event = QHelpEvent(pos=SimpleNamespace(x=lambda: 0))
-    assert progress_ui.progress_tooltip_filter.eventFilter(progress_ui.progressBar, event) is True
-    assert "Cards completed:" in QToolTip.last_text
-    assert "Click for full Deck Breakdown." in QToolTip.last_text
+    assert progress_ui.progressBar.toolTip() == "Click for Deck Breakdown."
 
     mod.setScrollingPB()
-    assert "Click for full Deck Breakdown." in progress_ui.progressBar.toolTip()
-    assert "Anki is updating the collection" in progress_ui.progressBar.toolTip()
+    assert progress_ui.progressBar.toolTip() == "Click for Deck Breakdown."
 
 
 def test_progress_bar_tooltips_can_be_disabled(addon_module):
     from addon.ui import progress_bar as progress_ui
-    from tests.stubs import QHelpEvent
 
     mod = addon_module
-    mod._apply_config({"tooltip_enabled": False})
-    mod.initPB()
-    progress_ui.update_progress_tooltips("Detailed metrics", "Completed", "Remaining", 0.5)
+    setup_progress_update(mod, {"tooltip_enabled": False})
 
     assert progress_ui.progressBar.toolTip() == ""
-    assert progress_ui.progress_tooltip_filter.eventFilter(progress_ui.progressBar, QHelpEvent()) is False
+    mod.setScrollingPB()
+    assert progress_ui.progressBar.toolTip() == ""
 
 
 def _prepare_state_change_counts(mod) -> None:
@@ -1764,7 +1752,7 @@ def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
     assert manifest["package"] == "1511983907"
     assert manifest["min_point_version"] == 49
     assert manifest["max_point_version"] == 260500
-    assert manifest["human_version"] == "1.1.5"
+    assert manifest["human_version"] == "1.1.6"
 
 
 def test_minimum_advertised_anki_version_uses_modern_gui_hooks(addon_module):
@@ -1797,10 +1785,12 @@ def test_menu_bar_exposes_progress_bar_settings_under_caleb_addons(addon_module)
     assert [action.text for action in submenu.actions] == ["Progress Bar settings"]
 
 
-def test_progress_bar_settings_reuses_existing_caleb_addons_menu(addon_module):
+def test_progress_bar_settings_reuses_existing_caleb_addons_menu(addon_module, monkeypatch):
     mod = addon_module
     first_menu_bar = mod.mw.form.menubar
     first_submenu = first_menu_bar.submenus[0]
+    footer_calls = []
+    monkeypatch.setattr(mod, "install_shared_menu_footer", lambda *args: footer_calls.append(args))
 
     delattr(mod.mw, "_progress_bar_settings_action")
     delattr(mod.mw, "_caleb_m_addons_menu")
@@ -1809,6 +1799,7 @@ def test_progress_bar_settings_reuses_existing_caleb_addons_menu(addon_module):
 
     assert len(first_menu_bar.submenus) == 1
     assert first_menu_bar.submenus[0] is first_submenu
+    assert footer_calls == [(first_submenu, mod.mw, "1511983907")]
     assert [action.text for action in first_submenu.actions] == ["Progress Bar settings"]
 
 
@@ -1887,6 +1878,9 @@ def test_deck_breakdown_populates_rows(addon_module):
     assert dialog._tree._items[0].toolTip(1) == "Due today: 6; New 1, Learning 2, Review 3"
     assert dialog._summary_card._title_label.text() == "Parent Today"
     assert dialog._summary_card._main_label.text() == "6 cards due today · 1 buried · Finish estimate: No ETA yet"
+    assert dialog._summary_card._due_value.text() == "6"
+    assert dialog._summary_card._buried_value.text() == "1"
+    assert dialog._summary_card._eta_value.text() == "No ETA yet"
     assert dialog._summary_card.toolTip() == ""
     assert dialog._summary_card._chip_labels["new"].text() == "New 1"
     assert dialog._summary_card._segment_bar._counts == (1, 2, 3)
@@ -2007,9 +2001,9 @@ def test_deck_breakdown_columns_auto_fit_then_become_interactive(addon_module):
     assert dialog._tree._resized_columns == [0, 1, 2, 3]
     assert mod._BREAKDOWN_DIALOG_MIN_WIDTH <= dialog._width <= mod._BREAKDOWN_DIALOG_MAX_WIDTH
     assert 250 <= dialog._tree._column_widths[0] <= 420
-    assert 190 <= dialog._tree._column_widths[1] <= 250
-    assert 190 <= dialog._tree._column_widths[2] <= 240
-    assert 100 <= dialog._tree._column_widths[3] <= 130
+    assert 210 <= dialog._tree._column_widths[1] <= 270
+    assert 210 <= dialog._tree._column_widths[2] <= 250
+    assert 110 <= dialog._tree._column_widths[3] <= 140
     assert dialog._tree.header()._section_resize == {
         0: QHeaderView.ResizeMode.Stretch,
         1: QHeaderView.ResizeMode.Interactive,
@@ -2251,31 +2245,6 @@ def test_deck_breakdown_sort_modes_reorder_siblings(addon_module):
     dialog._sort_combo.setCurrentIndex(dialog._sort_combo.findData("eta"))
 
     assert [item.text(0) for item in dialog._tree._items] == ["Bravo", "Alpha", "Charlie"]
-
-
-def test_deck_breakdown_copy_summary_writes_clipboard(addon_module):
-    mod = addon_module
-    dialog = mod.DeckBreakdownDialog(mod.mw)
-    dialog.update_rows(
-        [
-            {
-                "name": "Parent",
-                "actionable": (1, 2, 3),
-                "buried": (0, 1, 0),
-                "eta": "10:31 AM",
-                "children": [],
-            }
-        ]
-    )
-
-    dialog._summary_card._copy_summary()
-
-    assert QApplication.clipboard().text() == (
-        "Parent Today\n"
-        "6 cards due today · 1 buried · Finish estimate: 10:31 AM\n"
-        "New 1 · Learning 2 · Review 3\n"
-        "Buried: 1 (New 0 · Learning 1 · Review 0)"
-    )
 
 
 def test_profile_close_persistence_records_counts(addon_module):

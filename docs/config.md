@@ -29,10 +29,10 @@ Legacy `lrn_steps` is retained only as ignored compatibility data. Changing it c
 
 The fill is weighted by `1 + historical Again rate`, separately for New, Learning/Relearning, and Review. Rates use the previous `no_days` completed scheduler days (default 7), excluding today. Each actual answer belongs to one category; categories without history have weight 1. Weights refresh on profile/day/lookback changes and stay stable during today's answers.
 
-The displayed completion percentage always uses raw counts: completed answers divided by completed answers plus actionable remaining cards. Repeated answers count separately. Four answers at weight 1.5 plus six remaining cards at weight 1 give 50% fill and 40% displayed completion. The bar explains the adjustment in its tooltip and accessibility description without adding a second completion percentage.
+The displayed completion percentage always uses raw counts: completed answers divided by completed answers plus actionable remaining cards. Repeated answers count separately. Four answers at weight 1.5 plus six remaining cards at weight 1 give 50% fill and 40% displayed completion. The bar explains the adjustment in its accessibility description without adding a second completion percentage.
 
 ETA uses measured review time, never weights or learning-step counts. Before five answers today, it uses the answer-weighted average of usable retained daily history; afterward, it uses today's recorded seconds per answer. Without either estimate it displays N/A. Anki's recorded time may be capped by the deck's answer-time limit.
 
 Completed answers follow the cards' current deck ownership, with original-deck attribution for filtered cards in Home totals. A selected filtered deck uses its currently contained cards consistently for counts and statistics. Anki's revlog has no deck ID, so historical deck attribution cannot be reconstructed after moves, return from a filtered deck, or deletion. Those scope changes can change progress.
 
-Advanced labels refit when the dock is resized, including a bar retained between Home and Review. Spacing is reduced before falling back to compact text at narrow widths; the detailed tooltip remains available.
+Advanced labels refit when the dock is resized, including a bar retained between Home and Review. Spacing is reduced before falling back to compact text at narrow widths; click the bar to open Deck Breakdown.
