@@ -120,6 +120,12 @@ class QRect:
     def top(self) -> int:
         return self._top
 
+    def right(self) -> int:
+        return self._left + self._width - 1
+
+    def bottom(self) -> int:
+        return self._top + self._height - 1
+
     def width(self) -> int:
         return self._width
 

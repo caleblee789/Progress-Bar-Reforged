@@ -3,7 +3,14 @@ Progress Bar Reforged for Anki
 
 Progress Bar Reforged adds a progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
 
-Current release: **v1.1.4**. [Install from AnkiWeb](https://ankiweb.net/shared/info/1511983907) with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the [latest GitHub release](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+Current release: **v1.1.5**. [Install from AnkiWeb](https://ankiweb.net/shared/info/1511983907) with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the [latest GitHub release](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+
+What's new in v1.1.5
+--------------------
+
+* **Clearer time labels** - time spent and time remaining use readable durations, with an unavailable estimate shown distinctly from zero time left.
+* **Details that fit** - the bar keeps the most useful information visible as its width changes, with full details in its tooltip.
+* **Refined colors** - Light and Dark themes improve contrast across the bar and settings. Auto colors follow Anki's theme while preserving customized colors.
 
 What's new in v1.1.4
 --------------------
@@ -55,7 +62,7 @@ Features
 Compatibility
 -------------
 
-The add-on is designed for Anki desktop 2.1.49 and newer. See the [release notes](docs/releases/v1.1.4.md) for the available testing coverage.
+The add-on is designed for Anki desktop 2.1.49 and newer. See the [v1.1.4 release notes](docs/releases/v1.1.4.md) for the most recent native testing coverage.
 
 Screenshots
 -----------

@@ -9,14 +9,14 @@
         "day": {
             "text": "#111827",
             "background": "#e7edf3",
-            "foreground": "#0e7490",
+            "foreground": "#6389b3",
             "border_radius": 0,
             "opacity": 100
         },
         "night": {
-            "text": "aliceblue",
-            "background": "rgba(39, 40, 40, 1)",
-            "foreground": "#3399cc",
+            "text": "#f1f5f9",
+            "background": "#111827",
+            "foreground": "#396fa8",
             "border_radius": 0,
             "opacity": 100
         }

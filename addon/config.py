@@ -218,6 +218,14 @@ settings = None  # type: ignore[assignment]
 validation_errors: List[str] = []
 
 
+def _refresh_default_colors(saved: Dict[str, Any], previous: Dict[str, str], current: Dict[str, str]) -> Dict[str, Any]:
+    # A single customized color protects the entire set, including unchanged
+    # companions. Geometry and opacity are never part of color migration.
+    if all(saved.get(key) == value for key, value in previous.items()):
+        return {**saved, **current}
+    return saved
+
+
 def _validate_theme(
     overrides: Dict[str, Any],
     defaults: Dict[str, Any],
@@ -520,20 +528,14 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     for legacy_key in LEGACY_SETTING_KEYS:
         normalized.pop(legacy_key, None)
 
-    default_day = {
-        "text": "#111827",
-        "background": "#e7edf3",
-        "foreground": "#0e7490",
-        "border_radius": 0,
-        "opacity": 100,
-    }
-    default_night = {
-        "text": "aliceblue",
-        "background": "rgba(39, 40, 40, 1)",
-        "foreground": "#3399cc",
-        "border_radius": 0,
-        "opacity": 100,
-    }
+    # Import after config initialization; ui also imports this module.
+    from .ui.theme import DARK, LIGHT
+
+    def bar_colors(tokens):
+        return {key: getattr(tokens, f"bar_{key}") for key in ("text", "background", "foreground")}
+
+    default_day = {**bar_colors(LIGHT), "border_radius": 0, "opacity": 100}
+    default_night = {**bar_colors(DARK), "border_radius": 0, "opacity": 100}
 
     appearance = config_data.get("appearance", {})
     if not isinstance(appearance, dict):
@@ -548,6 +550,17 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         errors.append("appearance.night must be an object; using defaults.")
         night_overrides = {}
 
+    day_overrides = _refresh_default_colors(
+        day_overrides,
+        {"text": "#111827", "background": "#e7edf3", "foreground": "#0e7490"},
+        bar_colors(LIGHT),
+    )
+    night_overrides = _refresh_default_colors(
+        night_overrides,
+        {"text": "aliceblue", "background": "rgba(39, 40, 40, 1)", "foreground": "#3399cc"},
+        bar_colors(DARK),
+    )
+
     day_theme = _validate_theme(day_overrides, default_day, "appearance.day", errors)
     night_theme = _validate_theme(night_overrides, default_night, "appearance.night", errors)
 
@@ -558,9 +571,13 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     if not isinstance(segment_color_config, dict):
         errors.append("segment_colors must be an object; using defaults.")
         segment_color_config = {}
-    # These defaults retain at least 3:1 contrast against both built-in tracks.
-    # Explicit user colors remain authoritative.
-    default_segment_colors = {"new": "#378ba5", "learning": "#aa7926", "review": "#41965a"}
+    light_segments = {key: getattr(LIGHT, f"segment_{key}") for key in ("new", "learning", "review")}
+    dark_segments = {key: getattr(DARK, f"segment_{key}") for key in ("new", "learning", "review")}
+    default_segment_colors = dark_segments if theme_is_night else light_segments
+    # The previous common defaults equal the Light set. Recognize both built-in
+    # sets so Auto can follow Anki while any customized set stays authoritative.
+    for built_in in (light_segments, dark_segments):
+        segment_color_config = _refresh_default_colors(segment_color_config, built_in, default_segment_colors)
     segment_colors = {
         "new": _color_or_default(segment_color_config.get("new"), default_segment_colors["new"], "segment_colors.new", errors),
         "learning": _color_or_default(segment_color_config.get("learning"), default_segment_colors["learning"], "segment_colors.learning", errors),

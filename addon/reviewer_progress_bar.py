@@ -623,6 +623,21 @@ def _pace_projection_text(source: str) -> str:
     return "Projected time remaining based on previous averages."
 
 
+def _format_duration(seconds: Optional[float], *, remaining: bool = False) -> str:
+    """Format durations without confusing them with the wall-clock ETA."""
+    if seconds is None:
+        return "N/A"
+    if seconds <= 0:
+        return "0m"
+    if seconds < 60:
+        return "<1m"
+    minutes = math.ceil(seconds / 60) if remaining else math.floor(seconds / 60)
+    hours, minutes = divmod(minutes, 60)
+    if not hours:
+        return f"{minutes}m"
+    return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+
+
 def _format_eta_time(seconds_remaining: int, tzinfo) -> str:
     if seconds_remaining <= 0:
         return "N/A"
@@ -713,14 +728,18 @@ def _refresh_open_theme_surfaces(settings_dialog: Optional["ProgressBarConfigDia
             _session_history_dialog = None
 
 
-def _fit_progress_bar_format(full_text: str, compact_text: str, minimal_text: str) -> str:
+def _fit_progress_bar_format(
+    full_text: str, compact_text: str, minimal_text: str, remaining_text: Optional[str] = None
+) -> str:
     """Choose a label that fits the live progress bar without clipping."""
 
     bar = progress_ui.progressBar
     if bar is None:
         return full_text
-    if getattr(settings, "compact_mode", False):
-        return compact_text
+    candidates = [compact_text, remaining_text, minimal_text]
+    if not getattr(settings, "compact_mode", False):
+        candidates[:0] = [full_text, full_text.replace("     |     ", " | ")]
+    candidates = [text for text in candidates if text is not None]
     try:
         width_candidates: List[int] = []
         for widget in (bar, getattr(bar, "parentWidget", lambda: None)(), getattr(progress_ui, "progress_dock", None)):
@@ -745,16 +764,14 @@ def _fit_progress_bar_format(full_text: str, compact_text: str, minimal_text: st
         measure = getattr(metrics, "horizontalAdvance", None)
         if not callable(measure):
             measure = getattr(metrics, "width", None)
-        if not callable(measure) or int(measure(full_text)) <= available:
-            return full_text
-        dense_text = full_text.replace("     |     ", " | ")
-        if int(measure(dense_text)) <= available:
-            return dense_text
-        if int(measure(compact_text)) <= available:
-            return compact_text
+        if not callable(measure):
+            return candidates[0]
+        for text in candidates:
+            if int(measure(text)) <= available:
+                return text
         return minimal_text
     except (AttributeError, RuntimeError, TypeError, ValueError):
-        return full_text
+        return candidates[0]
 
 
 def _refresh_progress_label() -> None:
@@ -963,13 +980,13 @@ def updatePB():
         projected_total_minutes = elapsed_minutes + projected_minutes
     pace_warning_messages: List[str] = []
 
-    # Time spent today (hours:minutes)
-    x = math.floor(thetime / 3600)
-    y = math.floor((thetime - (x * 3600)) / 60)
-
-    # Break down remaining into hours/minutes for display
-    hrhr = seconds_remaining // 3600
-    hrmin = (seconds_remaining % 3600) // 60
+    spent_display = _format_duration(thetime)
+    # Keep second-rounded calculations and ETA intact. Format the positive
+    # estimate before rounding so tiny estimates never appear completed.
+    remaining_duration = 0 if var_diff == 0 else (
+        var_diff * pace_seconds_per_card if pace_estimate is not None else None
+    )
+    remaining_display = _format_duration(remaining_duration, remaining=True)
 
     # ETA display using system timezone by default, or the configured offset when overridden
     eta_display = _format_eta_time(seconds_remaining, _current_tzinfo())
@@ -1106,7 +1123,7 @@ def updatePB():
     elif mode == "time_left":
         output = f"{raw_done}/{raw_total} ({percent:.0f}%)" if settings.show_percent else f"{raw_done}/{raw_total}"
         output += f"     |     {var_diff:.0f} left"
-        output += f"     |     {x:02d}:{y:02d} spent"
+        output += f"     |     {spent_display} spent"
         tooltip_lines.append(
             f"Cards completed: {raw_done} ({percent:.02f}% of today's total)."
         )
@@ -1114,36 +1131,17 @@ def updatePB():
             f"Cards remaining: {var_diff:.0f} ({percentdiff:.02f}% of today's session)."
         )
         tooltip_lines.append(
-            f"Time spent reviewing so far today: {x:02d}:{y:02d}."
+            f"Time spent reviewing so far today: {spent_display}."
         )
         completed_tooltip_lines.append(
             f"Cards completed: {raw_done} ({percent:.02f}% of today's total)."
         )
         completed_tooltip_lines.append(
-            f"Time spent reviewing so far today: {x:02d}:{y:02d}."
+            f"Time spent reviewing so far today: {spent_display}."
         )
         remaining_tooltip_lines.append(
             f"Cards remaining: {var_diff:.0f} ({percentdiff:.02f}% of today's session)."
         )
-        if speed > 0:
-            output += f"     |     {hrhr:02d}:{hrmin:02d} more"
-            output += f"     |     ETA {eta_display}"
-            tooltip_lines.append(projection_text)
-            tooltip_lines.append(
-                f"Estimated finish time adjusted for your {'system' if settings.use_system_timezone else 'custom'} timezone: {eta_display}."
-            )
-            remaining_tooltip_lines.append(projection_text)
-            remaining_tooltip_lines.append(
-                f"Estimated finish time adjusted for your {'system' if settings.use_system_timezone else 'custom'} timezone: {eta_display}."
-            )
-        else:
-            output += "     |     --:-- more"
-            output += "     |     ETA N/A"
-            tooltip_lines.append(projection_text)
-            tooltip_lines.append(
-                "Estimated finish time unavailable until enough review history or today's pace is available."
-            )
-            remaining_tooltip_lines.append(projection_text)
     elif settings.show_number:
         base_displayed = True
         if settings.show_percent:
@@ -1229,34 +1227,15 @@ def updatePB():
                 completed_tooltip_lines.append(
                     "Super-mature retention rate for today's reviews."
                 )
-        output += f"     |     {x:02d}:{y:02d} spent"
+        output += f"     |     {spent_display} spent"
         tooltip_lines.append(
-            f"Time spent reviewing so far today: {x:02d}:{y:02d}."
+            f"Time spent reviewing so far today: {spent_display}."
         )
         completed_tooltip_lines.append(
-            f"Time spent reviewing so far today: {x:02d}:{y:02d}."
+            f"Time spent reviewing so far today: {spent_display}."
         )
         if goal_text_parts:
             output += "     |     Goals " + " · ".join(goal_text_parts)
-        if speed > 0:
-            output += f"     |     {hrhr:02d}:{hrmin:02d} more"
-            tooltip_lines.append(projection_text)
-            remaining_tooltip_lines.append(projection_text)
-            output += f"     |     ETA {eta_display}"
-            tooltip_lines.append(
-                f"Estimated finish time adjusted for your {'system' if settings.use_system_timezone else 'custom'} timezone: {eta_display}."
-            )
-            remaining_tooltip_lines.append(
-                f"Estimated finish time adjusted for your {'system' if settings.use_system_timezone else 'custom'} timezone: {eta_display}."
-            )
-        else:
-            output += "     |     --:-- more"
-            tooltip_lines.append(projection_text)
-            output += "     |     ETA N/A"
-            tooltip_lines.append(
-                "Estimated finish time unavailable until enough review history or today's pace is available."
-            )
-            remaining_tooltip_lines.append(projection_text)
         if settings.show_debug:
             output += f"     |     {new_weight:.02f} New Weight"
             tooltip_lines.append(
@@ -1281,6 +1260,27 @@ def updatePB():
             )
     else:
         output = "Goals " + " · ".join(goal_text_parts) if goal_text_parts else ""
+
+    if mode != "simple":
+        output += f"     |     {remaining_display} remaining     |     ETA {eta_display}"
+        remaining_details = [f"{remaining_display} remaining."]
+        if var_diff == 0:
+            remaining_details.append("No actionable cards remain.")
+        elif pace_estimate is None:
+            remaining_details.append(projection_text)
+            remaining_details.append("Estimated finish time unavailable until enough review history or today's pace is available.")
+        else:
+            remaining_details.append(projection_text)
+            remaining_details.append(
+                f"Estimated finish time adjusted for your {'system' if settings.use_system_timezone else 'custom'} timezone: {eta_display}."
+            )
+        tooltip_lines.extend(remaining_details)
+        remaining_tooltip_lines.extend(remaining_details)
+        # The full label remains available whichever part of a shortened bar
+        # is hovered; the existing region-specific explanations follow it.
+        full_details = output.replace("     |     ", " | ")
+        for lines in (tooltip_lines, completed_tooltip_lines, remaining_tooltip_lines):
+            lines.insert(0, full_details)
 
     if goal_tooltip_lines:
         tooltip_lines.extend(goal_tooltip_lines)
@@ -1354,14 +1354,18 @@ def updatePB():
     if warning_active:
         format_output = (format_output + " ⚠").strip() if format_output else "⚠"
     compact_output = f"{raw_done}/{raw_total} ({percent:.0f}%)  |  {var_diff:.0f} left"
-    if speed > 0:
-        compact_output += f"  |  ETA {eta_display}"
-    if warning_active:
-        compact_output += "  ⚠"
+    remaining_output = compact_output
+    if mode != "simple":
+        remaining_output += f"  |  {remaining_display} remaining"
+        compact_output = remaining_output + f"  |  ETA {eta_display}"
     minimal_output = f"{raw_done}/{raw_total}  |  {var_diff:.0f} left"
     if warning_active:
+        compact_output += "  ⚠"
+        remaining_output += "  ⚠"
         minimal_output += "  ⚠"
-    progress_ui.progressBar._progress_label_variants = (format_output, compact_output, minimal_output)
+    progress_ui.progressBar._progress_label_variants = (
+        format_output, compact_output, minimal_output, remaining_output
+    )
     _refresh_progress_label()
     global _warning_active
     if warning_active != _warning_active:

@@ -164,12 +164,12 @@ class SegmentedProgressBar(QProgressBar):
         self._progress_fraction = max(0.0, min(1.0, progress_fraction))
         self.update()
 
-    def _draw_segments_horizontal(self, painter: QPainter, rect: QRect, palette) -> None:
+    def _draw_segments_horizontal(self, painter: QPainter, rect: QRect, palette, inverted: bool = False) -> None:
         available_width = rect.width()
         start_x = rect.left()
 
         filled_width = int(round(available_width * self._progress_fraction))
-        if self.invertedAppearance():
+        if inverted:
             filled_rect = QRect(rect.right() - filled_width + 1, rect.top(), filled_width, rect.height())
         else:
             filled_rect = QRect(start_x, rect.top(), filled_width, rect.height())
@@ -190,7 +190,7 @@ class SegmentedProgressBar(QProgressBar):
         ]
 
         running_x = rect.left()
-        if not self.invertedAppearance():
+        if not inverted:
             running_x += filled_width
         positive_segments = [(name, count) for name, count in segment_order if count > 0]
         painted_width = 0
@@ -210,11 +210,11 @@ class SegmentedProgressBar(QProgressBar):
 
             painter.fillRect(seg_rect, self._segment_colors.get(name, palette.color(palette.ColorRole.Highlight)))
 
-    def _draw_segments_vertical(self, painter: QPainter, rect: QRect, palette) -> None:
+    def _draw_segments_vertical(self, painter: QPainter, rect: QRect, palette, inverted: bool = False) -> None:
         available_height = rect.height()
 
         filled_height = int(round(available_height * self._progress_fraction))
-        if self.invertedAppearance():
+        if inverted:
             filled_rect = QRect(rect.left(), rect.top(), rect.width(), filled_height)
             remaining_start = rect.top() + filled_height
         else:
@@ -262,9 +262,9 @@ class SegmentedProgressBar(QProgressBar):
 
         rect = option.rect.adjusted(1, 1, -1, -1)
         if self.orientation() == Qt.Orientation.Vertical:
-            self._draw_segments_vertical(painter, rect, option.palette)
+            self._draw_segments_vertical(painter, rect, option.palette, option.invertedAppearance)
         else:
-            self._draw_segments_horizontal(painter, rect, option.palette)
+            self._draw_segments_horizontal(painter, rect, option.palette, option.invertedAppearance)
 
         option.rect = rect
         painter.drawControl(QStyle.ControlElement.CE_ProgressBarLabel, option)

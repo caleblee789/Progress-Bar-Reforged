@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from copy import deepcopy
 import json
 import sqlite3
 import re
@@ -165,8 +166,8 @@ def seed_progress_counts(mod, done: int = 2, remain: int = 8) -> None:
     mod.remainCount[1] = float(remain)
     mod.rawDoneCount[1] = done
     mod.rawRemainCount[1] = remain
-    mod.actionableNewCount[1] = 4
-    mod.actionableLrnCount[1] = 3
+    mod.actionableNewCount[1] = min(4, remain)
+    mod.actionableLrnCount[1] = min(3, max(0, remain - 4))
     mod.actionableRevCount[1] = max(0, remain - 7)
     mod.buriedNewCount[1] = 1
     mod.buriedLrnCount[1] = 0
@@ -259,7 +260,8 @@ def test_malformed_config_is_repaired_without_stylesheet_injection(mw):
     assert settings.bar_height == ""
     assert settings.padding == "1.5em"
     assert settings.opacity == 100
-    assert settings.raw_config["appearance"]["day"]["foreground"] == "#0e7490"
+    from addon.ui.theme import LIGHT
+    assert settings.raw_config["appearance"]["day"]["foreground"] == LIGHT.bar_foreground
     assert settings.raw_config["segment_colors"] == {
         "new": "#378ba5",
         "learning": "#aa7926",
@@ -410,34 +412,20 @@ def test_theme_resolution_controls_bar_and_dialog_palettes(addon_module):
     mod = addon_module
     from aqt.theme import theme_manager
 
-    theme_manager.night_mode = True
-    mod._apply_config({"theme": "auto"})
-    assert mod.settings.active_theme.background == "rgba(39, 40, 40, 1)"
-    assert mod.settings.active_theme.foreground == "#3399cc"
-    assert mod._ui_palette()["window_bg"] == "#0b1220"
-    assert mod._ui_palette()["helper_text"] == "#a5b2c5"
-
-    mod._apply_config({"theme": "light"})
-    assert mod.settings.active_theme.background == "#e7edf3"
-    assert mod.settings.active_theme.foreground == "#0e7490"
-    assert mod._ui_palette()["window_bg"] == "#f7f9fc"
-    assert mod._ui_palette()["muted_row_text"] == "#667085"
-    assert "summary_bg" in mod._ui_palette()
-    assert "segment_new" in mod._ui_palette()
-
-    theme_manager.night_mode = False
-    mod._apply_config({"theme": "dark"})
-    assert mod.settings.active_theme.background == "rgba(39, 40, 40, 1)"
-    assert mod._ui_palette()["window_bg"] == "#0b1220"
-    assert mod._ui_palette()["card_bg"] == "#111827"
-    assert mod._ui_palette()["muted_row_text"] == "#94a3b8"
-    assert "summary_bg" in mod._ui_palette()
-    assert "segment_review" in mod._ui_palette()
-
-    settings_dialog = mod.ProgressBarConfigDialog(mod.mw)
-    history_dialog = mod.SessionHistoryDialog(mod.mw)
-    assert "#0b1220" in settings_dialog.styleSheet()
-    assert history_dialog._palette["window_bg"] == "#0b1220"
+    for night_mode, choice, expected in (
+        (True, "auto", "dark"), (True, "light", "light"),
+        (False, "dark", "dark"), (False, "auto", "light"),
+    ):
+        theme_manager.night_mode = night_mode
+        mod._apply_config({"theme": choice})
+        palette = mod._ui_palette(expected)
+        assert mod._ui_palette() == palette
+        for role in ("text", "background", "foreground"):
+            assert getattr(mod.settings.active_theme, role) == palette[f"bar_{role}"]
+        settings_dialog = mod.ProgressBarConfigDialog(mod.mw)
+        history_dialog = mod.SessionHistoryDialog(mod.mw)
+        assert palette["window_bg"] in settings_dialog.styleSheet()
+        assert history_dialog._palette["window_bg"] == palette["window_bg"]
 
 
 def test_release_polish_styles_are_applied(addon_module):
@@ -449,11 +437,12 @@ def test_release_polish_styles_are_applied(addon_module):
 
     assert "font-weight: 600;" in mod.settings.default_stylesheet
     assert "min-height: 22px;" in mod.settings.default_stylesheet
-    assert "#111827" in mod.settings.default_stylesheet
-    assert "#0e7490" in mod.settings.default_stylesheet
+    assert mod._ui_palette("light")["bar_text"] in mod.settings.default_stylesheet
+    assert mod._ui_palette("light")["bar_foreground"] in mod.settings.default_stylesheet
     assert "min-height: 20px;" in dialog.styleSheet()
-    assert "border-color: #5b8def;" in dialog.styleSheet()
-    assert row.styleSheet() == "border-bottom: 1px solid #7c8ba1;"
+    palette = mod._ui_palette("light")
+    assert f"border-color: {palette['focus_border']};" in dialog.styleSheet()
+    assert row.styleSheet() == f"border-bottom: 1px solid {palette['row_divider']};"
     assert "min-height: 20px;" in dialog.shortcut_field._editor.styleSheet()
 
 
@@ -464,8 +453,8 @@ def test_settings_dialog_light_theme_styles_shortcut_and_buttons(addon_module):
     mod._apply_config({"theme": "light"})
     dialog = mod.ProgressBarConfigDialog(mod.mw)
 
-    assert "#f7f9fc" in dialog.styleSheet()
-    assert "#0b1220" not in dialog.styleSheet()
+    assert mod._ui_palette("light")["window_bg"] in dialog.styleSheet()
+    assert mod._ui_palette("dark")["window_bg"] not in dialog.styleSheet()
     assert "#0f172a" not in dialog.shortcut_field._editor.styleSheet()
     assert "QKeySequenceEdit#shortcutRecorder QToolButton" in dialog.shortcut_field._editor.styleSheet()
     assert "QKeySequenceEdit#shortcutRecorder QLineEdit" in dialog.shortcut_field._editor.styleSheet()
@@ -473,13 +462,13 @@ def test_settings_dialog_light_theme_styles_shortcut_and_buttons(addon_module):
     assert "QKeySequenceEdit#shortcutRecorder:active" in dialog.shortcut_field._editor.styleSheet()
     assert "background-color: #ffffff;" in dialog.shortcut_field._editor.styleSheet()
     assert dialog.shortcut_field._editor.palette().color(QPalette.ColorRole.Base).name() == "#ffffff"
-    assert dialog.shortcut_field._editor.palette().color(QPalette.ColorRole.Text).name() == "#1f2937"
+    assert dialog.shortcut_field._editor.palette().color(QPalette.ColorRole.Text).name() == mod._ui_palette("light")["primary_text"]
     native_child = dialog.shortcut_field._editor._native_editor_child
     assert native_child.palette().color(QPalette.ColorRole.Base).name() == "#ffffff"
     assert native_child._auto_fill_background is True
     assert "QToolButton#shortcutResetButton" in dialog.shortcut_field._reset_btn.styleSheet()
-    assert "background: #f5f7fb;" in dialog.shortcut_field._reset_btn.styleSheet()
-    assert "background: #eef2f7;" in dialog.styleSheet()
+    assert f"background: {mod._ui_palette('light')['button_bg']};" in dialog.shortcut_field._reset_btn.styleSheet()
+    assert f"background: {mod._ui_palette('light')['disabled_bg']};" in dialog.styleSheet()
     for combo in (dialog.display_location_combo, dialog.mode_combo, dialog.dock_area_combo, dialog.theme_combo):
         assert "background: #ffffff;" in combo.styleSheet()
         assert "#0f172a" not in combo.styleSheet()
@@ -509,7 +498,7 @@ def test_settings_dialog_auto_theme_rethemes_shortcut_native_palette(addon_modul
     theme_manager.night_mode = True
     mod._apply_config({"theme": "auto"})
     dialog = mod.ProgressBarConfigDialog(mod.mw)
-    assert dialog.shortcut_field._editor.palette().color(QPalette.ColorRole.Base).name() == "#0f172a"
+    assert dialog.shortcut_field._editor.palette().color(QPalette.ColorRole.Base).name() == mod._ui_palette("dark")["field_bg"]
 
     theme_manager.night_mode = False
     dialog.apply_theme()
@@ -598,21 +587,34 @@ def test_dialog_theme_tokens_keep_text_contrast(addon_module):
         ("checkbox_text", "window_bg"),
         ("muted_row_text", "card_bg"),
         ("eta_muted_text", "card_bg"),
+        ("muted_row_text", "table_alt_bg"),
+        ("eta_muted_text", "table_alt_bg"),
+        ("helper_text", "card_bg"),
+        ("primary_text", "field_bg"),
+        ("tab_selected_text", "tab_selected_bg"),
         ("chip_new_text", "chip_new_bg"),
         ("chip_learning_text", "chip_learning_bg"),
         ("chip_review_text", "chip_review_bg"),
         ("accent_text", "accent"),
         ("danger_text", "danger_bg"),
         ("tooltip_text", "tooltip_bg"),
+        ("bar_text", "bar_background"),
+        ("bar_text", "bar_foreground"),
+        ("bar_text", "segment_new"),
+        ("bar_text", "segment_learning"),
+        ("bar_text", "segment_review"),
     ]
     for theme in ("light", "dark"):
         palette = mod._ui_palette(theme)
         for foreground_key, background_key in checked_pairs:
-            assert _contrast_ratio(palette[foreground_key], palette[background_key]) >= 4.5
+            assert _contrast_ratio_over(
+                palette[foreground_key], palette[background_key], palette["card_bg"]
+            ) >= 4.5
 
         assert _contrast_ratio(palette["disabled_text"], palette["disabled_bg"]) >= 4.5
         assert _contrast_ratio(palette["field_border"], palette["field_bg"]) >= 3.0
-        assert _contrast_ratio(palette["button_border"], palette["button_bg"]) >= 3.0
+        for state in ("button_bg", "button_hover_bg", "button_pressed_bg"):
+            assert _contrast_ratio(palette["button_border"], palette[state]) >= 3.0
         assert _contrast_ratio(palette["focus_border"], palette["field_bg"]) >= 3.0
         assert _contrast_ratio(palette["scrollbar_handle"], palette["scrollbar_bg"]) >= 3.0
         assert _contrast_ratio(palette["chart_cards"], palette["card_bg"]) >= 3.0
@@ -620,16 +622,13 @@ def test_dialog_theme_tokens_keep_text_contrast(addon_module):
         assert _contrast_ratio(palette["chart_retention"], palette["card_bg"]) >= 3.0
         assert _contrast_ratio(palette["danger_text"], palette["card_bg"]) >= 4.5
         for border_key, background_key in (
-            ("tab_border", "tab_selected_bg"),
-            ("card_border", "card_bg"),
-            ("summary_border", "summary_bg"),
             ("chip_border", "chip_muted_bg"),
             ("chip_new_border", "chip_new_bg"),
             ("chip_learning_border", "chip_learning_bg"),
             ("chip_review_border", "chip_review_bg"),
-            ("row_divider", "card_bg"),
             ("tooltip_border", "tooltip_bg"),
             ("danger_border", "danger_bg"),
+            ("bar_foreground", "bar_background"),
             ("segment_empty", "segment_track"),
             ("segment_new", "segment_track"),
             ("segment_learning", "segment_track"),
@@ -719,13 +718,50 @@ def test_ui_sources_do_not_embed_unapproved_color_literals():
 
 def test_progress_bar_default_segments_match_semantic_palette(addon_module):
     mod = addon_module
-    mod._apply_config({})
+    from aqt.theme import theme_manager
 
-    assert {name: color.name() for name, color in mod.settings.segment_colors.items()} == {
-        "new": "#378ba5",
-        "learning": "#aa7926",
-        "review": "#41965a",
+    config = {"theme": "auto"}
+    for night_mode in (False, True, False):
+        theme_manager.night_mode = night_mode
+        mod._apply_config(config)
+        expected = {key: mod._ui_palette()[f"segment_{key}"] for key in ("new", "learning", "review")}
+        assert {name: color.name() for name, color in mod.settings.segment_colors.items()} == expected
+        config = deepcopy(mod.settings.raw_config)
+        mod._apply_config(config)
+        assert mod.settings.raw_config == config
+
+
+def test_builtin_palette_migration_preserves_custom_sets_and_geometry(addon_module):
+    mod = addon_module
+    old = {
+        "day": {"text": "#111827", "background": "#e7edf3", "foreground": "#0e7490", "opacity": 73, "border_radius": 4},
+        "night": {"text": "aliceblue", "background": "rgba(39, 40, 40, 1)", "foreground": "#3399cc", "opacity": 82, "border_radius": 7},
     }
+    packaged = json.loads((Path(__file__).parents[1] / "addon" / "config.json").read_text())
+    for customized in (None, "day", "night"):
+        for color in ("text", "background", "foreground"):
+            saved = deepcopy(old)
+            if customized:
+                saved[customized][color] = "#123456"
+            mod._apply_config({"appearance": saved})
+            for mode, theme in (("day", "light"), ("night", "dark")):
+                actual = mod.settings.raw_config["appearance"][mode]
+                if mode == customized:
+                    assert actual == saved[mode]
+                else:
+                    for key in ("text", "background", "foreground"):
+                        assert actual[key] == mod._ui_palette(theme)[f"bar_{key}"] == packaged["appearance"][mode][key]
+                    assert actual["opacity"] == saved[mode]["opacity"]
+                    assert actual["border_radius"] == saved[mode]["border_radius"]
+            normalized = deepcopy(mod.settings.raw_config)
+            mod._apply_config(normalized)
+            assert mod.settings.raw_config == normalized
+
+    # A single customized segment protects its otherwise built-in companions.
+    segments = {"new": "#123456", "learning": "#aa7926", "review": "#41965a"}
+    for theme in ("dark", "light"):
+        mod._apply_config({"theme": theme, "segment_colors": segments})
+        assert mod.settings.raw_config["segment_colors"] == segments
 
 
 def test_progress_bar_custom_colors_remain_authoritative(addon_module):
@@ -1100,7 +1136,8 @@ def test_progress_modes_change_visible_label(addon_module):
     setup_progress_update(mod, {"mode": "time_left"})
     time_label = mod.progressBar.format()
     assert "ETA" in time_label
-    assert "spent" in time_label
+    assert "<1m spent" in time_label
+    assert "N/A remaining" in time_label
     assert "Again" not in time_label
 
     setup_progress_update(mod, {"mode": "stats"})
@@ -1128,6 +1165,8 @@ def test_eta_uses_history_before_any_cards_today(addon_module):
     assert "ETA " in mod.progressBar.format()
     assert "ETA N/A" not in mod.progressBar.format()
     assert "previous averages" in mod.progressBar.toolTip()
+    assert "2m remaining" in mod.progressBar.format()
+    assert "0m spent" in mod.progressBar.format()
     assert mod._latest_breakdown_rows[0]["eta"] != "N/A"
 
 
@@ -1157,22 +1196,45 @@ def test_eta_uses_today_pace_after_five_cards(addon_module):
     assert "today's pace" in mod.progressBar.toolTip()
 
 
-def test_eta_stays_unavailable_without_usable_history_before_threshold(addon_module):
+def test_time_labels_distinguish_unavailable_completed_and_subminute_estimates(addon_module):
     mod = addon_module
+    unusable_history = [
+        {"day": 9, "cards": 0, "avg_seconds": 10.0},
+        {"day": 8, "cards": 10, "avg_seconds": 0.0},
+    ]
+    for mode in ("time_left", "stats"):
+        for cards, seconds, remaining, expected in (
+            (4, 80, 8, "N/A remaining"),
+            (4, 80, 0, "0m remaining"),
+            (5, 1, 1, "<1m remaining"),
+            (5, 300, 0, "0m remaining"),
+        ):
+            setup_progress_update_with_history(
+                mod, today_stats=(cards, 0, 0, cards, 0, 0, seconds),
+                history_records=unusable_history, remain=remaining,
+                config={"mode": mode},
+            )
+            assert expected in mod.progressBar.format()
+            assert expected in mod.progressBar.toolTip()
+            if expected.startswith("N/A"):
+                assert mod._last_cards_per_minute is None
+                assert "enough review history" in mod.progressBar.toolTip()
+            # Tiny estimates keep the existing second-rounded ETA behavior.
+            assert "ETA N/A" in mod.progressBar.format()
+            assert mod._latest_breakdown_rows[0]["eta"] == "N/A"
 
-    setup_progress_update_with_history(
-        mod,
-        today_stats=(4, 0, 0, 4, 0, 0, 80),
-        history_records=[
-            {"day": 9, "cards": 0, "avg_seconds": 10.0},
-            {"day": 8, "cards": 10, "avg_seconds": 0.0},
-        ],
-    )
 
-    assert mod._last_cards_per_minute is None
-    assert "ETA N/A" in mod.progressBar.format()
-    assert "enough review history" in mod.progressBar.toolTip()
-    assert mod._latest_breakdown_rows[0]["eta"] == "N/A"
+def test_duration_formatting_rounds_elapsed_down_and_estimates_up(addon_module):
+    for seconds, elapsed, remaining in (
+        (None, "N/A", "N/A"), (0, "0m", "0m"),
+        (0.1, "<1m", "<1m"), (59.9, "<1m", "<1m"),
+        (60, "1m", "1m"), (60.1, "1m", "2m"),
+        (3599, "59m", "1h"), (3600, "1h", "1h"),
+        (3601, "1h", "1h 1m"), (4320, "1h 12m", "1h 12m"),
+        (86399, "23h 59m", "24h"),
+    ):
+        assert addon_module._format_duration(seconds) == elapsed
+        assert addon_module._format_duration(seconds, remaining=True) == remaining
 
 
 def test_simple_home_bar_does_not_show_seeded_eta(addon_module):
@@ -1187,6 +1249,11 @@ def test_simple_home_bar_does_not_show_seeded_eta(addon_module):
 
     assert mod._last_cards_per_minute is not None
     assert "ETA" not in mod.progressBar.format()
+    mod.settings.compact_mode = True
+    mod.progressBar.resize(220, 24)
+    mod._refresh_progress_label()
+    assert "ETA" not in mod.progressBar.format()
+    assert "remaining" not in mod.progressBar.format()
 
 
 def test_stats_zero_done_keeps_full_label_when_initial_width_is_unrealized(addon_module):
@@ -1236,16 +1303,20 @@ def test_progress_label_falls_back_to_compact_and_minimal_text(addon_module):
         def fontMetrics(self):
             return Metrics()
 
-    full = "Full progress details that do not fit"
-    compact = "2/10 (20%) | 8 left"
+    full = "2/10 (20%)     |     8 left     |     5m spent     |     20m remaining     |     ETA 11:00 AM"
+    dense = full.replace("     |     ", " | ")
+    compact = "2/10 (20%) | 8 left | 20m remaining | ETA 11:00 AM"
+    remaining = "2/10 (20%) | 8 left | 20m remaining"
     minimal = "2/10 | 8 left"
 
-    mod.progress_ui.progressBar = Bar(230)
-    assert mod._fit_progress_bar_format(full, compact, minimal) == compact
-    mod.progress_ui.progressBar = Bar(120)
-    assert mod._fit_progress_bar_format(full, compact, minimal) == minimal
-    mod.progress_ui.progressBar = Bar(500)
-    assert mod._fit_progress_bar_format(full, compact, minimal) == full
+    for expected in (full, dense, compact, remaining, minimal):
+        mod.progress_ui.progressBar = Bar(len(expected) * 10 + 16)
+        assert mod._fit_progress_bar_format(full, compact, minimal, remaining) == expected
+    mod.settings.compact_mode = True
+    mod.progress_ui.progressBar = Bar(2000)
+    assert mod._fit_progress_bar_format(full, compact, minimal, remaining) == compact
+    mod.progress_ui.progressBar = Bar(len(remaining) * 10 + 16)
+    assert mod._fit_progress_bar_format(full, compact, minimal, remaining) == remaining
 
 
 def test_initial_advanced_label_uses_main_window_width_when_bar_width_is_stale(addon_module):
@@ -1278,16 +1349,17 @@ def test_advanced_label_recovers_after_resize_in_both_display_locations(addon_mo
 
     mod = addon_module
     full = "4 (40%) done | 6 left | 10 s/card | 25% Again | 80% Retention | ETA 11:00 AM"
-    compact = "4/10 (40%) | 6 left"
+    compact = "4/10 (40%) | 6 left | 20m remaining | ETA 11:00 AM"
+    remaining = "4/10 (40%) | 6 left | 20m remaining"
     minimal = "4/10 | 6 left"
     for location in ("review", "review_and_home"):
         mod._apply_config({"mode": "stats", "display_location": location})
         mod.initPB()
         bar = mod.progressBar
         bar.show()
-        bar._progress_label_variants = (full, compact, minimal)
+        bar._progress_label_variants = (full, compact, minimal, remaining)
         bar.fontMetrics = lambda: SimpleNamespace(horizontalAdvance=lambda text: len(text) * 10)
-        for width, expected in ((250, compact), (1600, full), (150, minimal), (1600, full)):
+        for width, expected in ((len(compact) * 10 + 16, compact), (1600, full), (len(remaining) * 10 + 16, remaining), (150, minimal), (1600, full)):
             bar.resize(width, 24)
             mod.progress_ui.interaction_filter.eventFilter(bar, QEvent(QEvent.Type.Resize))
             assert bar.format() == expected
@@ -1389,11 +1461,18 @@ def test_segmented_progress_bar_paints_remaining_segments():
     )
     bar.setSegmentData(3, 2, 1, 0.25)
 
-    painter = QPainter()
-    bar._draw_segments_horizontal(painter, QRect(0, 0, 100, 10), palette)
+    for inverted in (False, True):
+        painter = QPainter()
+        bar._draw_segments_horizontal(painter, QRect(0, 0, 100, 10), palette, inverted)
+        assert painter.filled[1][0].left() == (75 if inverted else 0)
+        assert painter.filled[2][0].left() == (0 if inverted else 25)
+        assert painter.filled[2][1].name() == "#111"
 
-    assert len(painter.filled) >= 3
-    assert any(fill[1].name() == "#111" for fill in painter.filled)
+        painter = QPainter()
+        bar._draw_segments_vertical(painter, QRect(0, 0, 10, 100), palette, inverted)
+        assert painter.filled[1][0].top() == (0 if inverted else 75)
+        assert painter.filled[2][0].top() == (25 if inverted else 0)
+        assert painter.filled[2][1].name() == "#111"
 
 
 def test_segmented_progress_bar_rounding_fills_track_exactly():
@@ -1685,7 +1764,7 @@ def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
     assert manifest["package"] == "1511983907"
     assert manifest["min_point_version"] == 49
     assert manifest["max_point_version"] == 260500
-    assert manifest["human_version"] == "1.1.4"
+    assert manifest["human_version"] == "1.1.5"
 
 
 def test_minimum_advertised_anki_version_uses_modern_gui_hooks(addon_module):
@@ -2025,9 +2104,9 @@ def test_deck_breakdown_reused_dialog_rethemes_after_settings_apply(addon_module
     mod._open_deck_breakdown_dialog()
     dialog = mod._deck_breakdown_dialog
 
-    assert "#0b1220" in dialog.styleSheet()
-    assert dialog._summary_card._palette["summary_bg"] == "#0f172a"
-    assert dialog._count_delegate._palette["card_bg"] == "#111827"
+    assert mod._ui_palette("dark")["window_bg"] in dialog.styleSheet()
+    assert dialog._summary_card._palette["summary_bg"] == mod._ui_palette("dark")["summary_bg"]
+    assert dialog._count_delegate._palette["card_bg"] == mod._ui_palette("dark")["card_bg"]
 
     settings_dialog = mod.ProgressBarConfigDialog(mod.mw)
     settings_dialog.theme_combo.setCurrentIndex(settings_dialog.theme_combo.findData("light"))
@@ -2035,8 +2114,8 @@ def test_deck_breakdown_reused_dialog_rethemes_after_settings_apply(addon_module
 
     assert mod.mw.addonManager.config["theme"] == "light"
     assert mod._deck_breakdown_dialog is dialog
-    assert "#f7f9fc" in dialog.styleSheet()
-    assert "#0b1220" not in dialog.styleSheet()
+    assert mod._ui_palette("light")["window_bg"] in dialog.styleSheet()
+    assert mod._ui_palette("dark")["window_bg"] not in dialog.styleSheet()
     assert "#ffffff" in dialog._tree.styleSheet()
     assert dialog._summary_card._palette["summary_bg"] == "#ffffff"
     assert dialog._count_delegate._palette["card_bg"] == "#ffffff"
