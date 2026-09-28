@@ -3,14 +3,19 @@ Progress Bar Reforged for Anki
 
 Progress Bar Reforged adds a progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
 
-Current release: **v1.1.6**. [Install from AnkiWeb](https://ankiweb.net/shared/info/1511983907) with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the [latest GitHub release](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+Current release: **v1.1.7**. [Install from AnkiWeb](https://ankiweb.net/shared/info/1511983907) with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the [latest GitHub release](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+
+What's new in v1.1.7
+--------------------
+
+* **Reviewer-focused gallery** - the current release images show the reviewer in Light and Dark themes with an AnKing card. Add-on behavior is unchanged from v1.1.6.
 
 What's new in v1.1.6
 --------------------
 
 * **Redesigned Deck Breakdown** - a clearer daily summary and a larger, more readable deck workload table in Light and Dark themes.
 * **Simpler controls** - Sort and Hide empty sit with the table; the summary no longer has the info and Copy buttons, and Sort choices fit without clipping.
-* **Updated screenshots** - native Anki 26.9.3 captures show both themes with an AnKing card. The deck workload shown is sample data.
+* **Updated screenshots** - native Anki 26.9.3 captures show both themes with an AnKing card and sample deck workload.
 
 What's new in v1.1.5
 --------------------
@@ -74,12 +79,11 @@ The add-on is designed for Anki desktop 2.1.49 and newer. See the [v1.1.4 releas
 Screenshots
 -----------
 
-These native Anki 26.9.3 captures use an AnKing card with the AnKing Notetypes add-on for card styling. The deck workload is sample data.
+These native Anki 26.9.3 captures use an AnKing card with the AnKing Notetypes add-on for card styling. Study counts are sample data.
 
 | | Dark | Light |
 | --- | --- | --- |
 | Reviewer | [![Reviewer in Dark theme](screenshots/reviewer-dark.png)](screenshots/reviewer-dark.png) | [![Reviewer in Light theme](screenshots/reviewer-light.png)](screenshots/reviewer-light.png) |
-| Deck Breakdown | [![Deck Breakdown in Dark theme](screenshots/deck-breakdown-dark.png)](screenshots/deck-breakdown-dark.png) | [![Deck Breakdown in Light theme](screenshots/deck-breakdown-light.png)](screenshots/deck-breakdown-light.png) |
 
 Installation
 ------------
