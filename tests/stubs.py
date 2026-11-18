@@ -30,6 +30,7 @@ class GuiHooks:
         self.reviewer_did_show_question = HookList()
         self.profile_did_open = HookList()
         self.profile_will_close = HookList()
+        self.sync_did_finish = HookList()
 
 
 class QColor:
@@ -702,6 +703,9 @@ class QHBoxLayout(QLayout):
 
 
 class QLabel(QWidget):
+    def setBuddy(self, widget) -> None:
+        self._buddy = widget
+
     def __init__(self, text: str = "") -> None:
         super().__init__()
         self._text = text

@@ -61,12 +61,17 @@ def build_package(output: Path, mod_time: int | None = None) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            "manifest.json",
-            json.dumps(_manifest(meta, package_mod_time), indent=2, sort_keys=True) + "\n",
-        )
+        def write_member(name: str, payload: bytes) -> None:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, payload)
+
+        manifest = json.dumps(_manifest(meta, package_mod_time), indent=2, sort_keys=True) + "\n"
+        write_member("manifest.json", manifest.encode("utf-8"))
         for path in _iter_package_files():
-            archive.write(path, path.relative_to(ADDON_DIR).as_posix())
+            write_member(path.relative_to(ADDON_DIR).as_posix(), path.read_bytes())
 
     return output
 

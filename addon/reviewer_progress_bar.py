@@ -1,4 +1,4 @@
-from __future__ import unicode_literals
+from __future__ import annotations
 import re
 import sys
 import logging
@@ -106,6 +106,8 @@ def __getattr__(name: str):
         return getattr(progress_ui, name)
     if name == "_last_cards_per_minute":
         return _progress_state.last_cards_per_minute
+    if name in {"_latest_breakdown_rows", "_latest_breakdown_summary"}:
+        _prepare_breakdown_rows()
     if name == "_latest_breakdown_rows":
         return _progress_state.latest_breakdown_rows
     if name == "_latest_breakdown_summary":
@@ -318,58 +320,64 @@ def _prepare_counts_for_new_profile() -> None:
     lrn_weight = new_weight = rev_weight = 1.0
 
 
-def _ensure_persisted_progress_loaded() -> None:
-    today = _current_day_stamp()
-
+def _ensure_persisted_progress_loaded(day_cutoff: Optional[int] = None) -> None:
+    if mw.pm is None or mw.col is None:
+        return
+    if day_cutoff is None:
+        day_cutoff = mw.col.sched.day_cutoff
+    today = day_cutoff // 86400
     if _progress_state.progress_restored and _progress_state.restored_day_stamp == today:
         return
 
-    if _progress_state.progress_restored and _progress_state.restored_day_stamp != today:
+    profile = getattr(mw.pm, "profile", None)
+    history_changed = False
+    if _progress_state.progress_restored:
+        previous_cutoff = _progress_state.last_history_cutoff
+        records = _progress_state.last_history_records
+        if (
+            previous_cutoff is not None and previous_cutoff < day_cutoff
+            and records and isinstance(profile, dict)
+            and profile.get(HISTORY_PROGRESS_KEY) is records
+        ):
+            # The last answer can land after the final throttled save. Read
+            # the old window once before discarding that day's state.
+            history_changed = history.update_daily_history(
+                profile, previous_cutoff // 86400, None, _revlog_stats_between,
+                day_cutoff=previous_cutoff, previous_records=records,
+            ) is not None
         screen = _progress_state.main_window_state
         deck_id = _progress_state.current_deck_id
         _prepare_counts_for_new_profile()
-        # A new study day clears metrics, but does not change Anki's screen.
         _progress_state.main_window_state = screen
         _progress_state.current_deck_id = deck_id
 
-    if mw.pm is None or mw.col is None:
-        return
+    if isinstance(profile, dict):
+        snapshot_removed = _restore_snapshot_counts(profile, today)
+        if snapshot_removed or history_changed:
+            mw.pm.save()
+    _progress_state.progress_restored = True
+    _progress_state.restored_day_stamp = today
 
-    profile = getattr(mw.pm, "profile", None)
-    if not isinstance(profile, dict):
-        _progress_state.progress_restored = True
-        _progress_state.restored_day_stamp = today
-        return
 
+def _restore_snapshot_counts(profile: Dict[str, Any], today: int) -> bool:
+    """Restore usable counts and report whether a stale snapshot was removed."""
     stored = profile.get(PERSISTED_PROGRESS_KEY)
     if not isinstance(stored, dict):
-        _progress_state.progress_restored = True
-        _progress_state.restored_day_stamp = today
-        return
+        return False
 
     try:
         stored_day = int(stored.get("day"))
     except (TypeError, ValueError, OverflowError):
         stored_day = None
-    if stored_day != today:
-        profile.pop(PERSISTED_PROGRESS_KEY, None)
-        mw.pm.save()
-        _progress_state.progress_restored = True
-        _progress_state.restored_day_stamp = today
-        return
-
     data = stored.get("data")
-    if not isinstance(data, dict):
+    if stored_day != today or not isinstance(data, dict):
         profile.pop(PERSISTED_PROGRESS_KEY, None)
-        mw.pm.save()
-        _progress_state.progress_restored = True
-        _progress_state.restored_day_stamp = today
-        return
+        return True
 
     for did_key, counts in data.items():
         try:
             did = int(did_key)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
 
         if not isinstance(counts, dict):
@@ -401,21 +409,29 @@ def _ensure_persisted_progress_loaded() -> None:
         rawDoneCount[did] = raw_done
         rawTotalCount[did] = raw_total
 
-    _progress_state.progress_restored = True
-    _progress_state.restored_day_stamp = today
+    return False
 
 
-def _persist_progress_snapshot(*, force: bool = False) -> None:
+def _persist_progress_snapshot(*, force: bool = False, day_cutoff: Optional[int] = None) -> None:
     if mw.pm is None or mw.col is None:
         return
 
-    _ensure_persisted_progress_loaded()
+    if day_cutoff is None:
+        day_cutoff = mw.col.sched.day_cutoff
+    _ensure_persisted_progress_loaded(day_cutoff)
 
     profile = getattr(mw.pm, "profile", None)
     if not isinstance(profile, dict):
         return
 
-    today = _current_day_stamp()
+    now = time.monotonic()
+    if (
+        not force and _progress_state.last_snapshot is not None
+        and now - _progress_state.last_persisted_ts < _PERSIST_INTERVAL_SECONDS
+    ):
+        return
+
+    today = day_cutoff // 86400
     snapshot: Dict[str, Dict[str, Any]] = {}
 
     for did, total in totalCount.items():
@@ -433,13 +449,7 @@ def _persist_progress_snapshot(*, force: bool = False) -> None:
             "raw_total": raw_total,
         }
 
-    now = time.monotonic()
-    persisted_changed = snapshot != _progress_state.last_snapshot
-    too_soon = (now - _progress_state.last_persisted_ts) < _PERSIST_INTERVAL_SECONDS
-
-    if not force and too_soon:
-        return
-    if not persisted_changed and not force:
+    if not force and snapshot == _progress_state.last_snapshot:
         return
 
     if snapshot:
@@ -447,23 +457,30 @@ def _persist_progress_snapshot(*, force: bool = False) -> None:
     else:
         profile.pop(PERSISTED_PROGRESS_KEY, None)
 
-    deck_tree = mw.col.sched.deck_due_tree()
-    deck_ids_for_query: List[int] = []
-    for node in deck_tree.children:
-        deck_ids_for_query.extend(_collect_deck_ids(node))
-    deck_ids_for_query = list(dict.fromkeys(deck_ids_for_query))
-    history.update_daily_history(profile, today, deck_ids_for_query, _revlog_stats_between)
+    records = history.update_daily_history(
+        profile, today, None, _revlog_stats_between, day_cutoff=day_cutoff,
+        previous_records=_progress_state.last_history_records,
+    )
 
     mw.pm.save()
+    _progress_state.last_history_records = records
+    _progress_state.last_history_cutoff = day_cutoff if records is not None else None
     _progress_state.last_snapshot = snapshot
     _progress_state.last_persisted_ts = now
 
 
-def add_info():
+def add_info(*, day_cutoff: Optional[int] = None):
     """Cache Again-rate weights for this profile, scheduler day, and lookback."""
-    if mw.col is None or getattr(mw.col, "db", None) is None or getattr(mw.col, "sched", None) is None:
+    if (
+        not settings.progress_bar_enabled
+        or mw.col is None
+        or getattr(mw.col, "db", None) is None
+        or getattr(mw.col, "sched", None) is None
+    ):
         return
-    key = (id(mw.col), int(mw.col.sched.day_cutoff), settings.no_days)
+    if day_cutoff is None:
+        day_cutoff = mw.col.sched.day_cutoff
+    key = (id(mw.col.db), int(day_cutoff), settings.no_days)
     if _progress_state.weight_history_key == key:
         return
     start = progress_scheduler.day_boundary_ms(key[1], settings.no_days + 1)
@@ -503,9 +520,7 @@ def _reinitialize_progress_bar() -> None:
     progress_ui.set_click_handler(_open_deck_breakdown_dialog)
     progress_ui._label_refresh_handler = _refresh_progress_label
     if settings.progress_bar_enabled and mw.col is not None and getattr(mw.col, "db", None) is not None:
-        _ensure_persisted_progress_loaded()
-        updateCountsForAllDecks(True)
-        updatePB()
+        _refresh_progress(True)
 
 
 def _should_show_progress_bar_for_state(state: Optional[str]) -> bool:
@@ -531,24 +546,33 @@ def _find_node_by_id(node, deck_id: int):
 
 
 def _collect_deck_ids(node) -> List[int]:
-    deck_ids = [node.deck_id]
-    for child in node.children:
-        deck_ids.extend(_collect_deck_ids(child))
+    deck_ids = []
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        deck_ids.append(current.deck_id)
+        pending.extend(reversed(current.children))
     return deck_ids
 
 
-def _done_counts_by_deck_since(cutoff: int) -> Dict[int, Tuple[int, int, int]]:
+def _done_counts_by_deck_since(
+    cutoff: int, selected_decks: Optional[List[int]] = None, *, day_cutoff: Optional[int] = None,
+) -> Dict[int, Tuple[int, int, int]]:
+    if day_cutoff is None:
+        day_cutoff = mw.col.sched.day_cutoff
     return progress_scheduler.completed_counts_by_deck(
-        mw.col.db, cutoff, progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff),
-        current_deck=currDID,
+        mw.col.db, cutoff, progress_scheduler.day_boundary_ms(day_cutoff),
+        current_deck=currDID, current_deck_ids=selected_decks,
     )
 
 
 def _queue_counts_for_node(
-    node, active_queue_counts: Optional[Tuple[int, int, int]] = None
+    node, active_queue_counts: Optional[Tuple[int, int, int]] = None,
+    *, buried_counts: Optional[Tuple[int, int, int]] = None,
 ) -> Tuple[int, int, int, int, int, int]:
     return progress_scheduler.queue_counts_for_node(
-        mw.col.db, mw.col.sched, node, _collect_deck_ids, active_queue_counts
+        mw.col.db, mw.col.sched, node, _collect_deck_ids, active_queue_counts,
+        buried_counts=buried_counts,
     )
 
 
@@ -566,13 +590,13 @@ def _current_reviewer_queue_counts() -> Optional[Tuple[int, int, int]]:
     )
 
 
-def _revlog_stats_since(cutoff: int, deck_ids: List[int]):
-    return progress_scheduler.revlog_stats(
-        mw.col.db, cutoff, progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff), deck_ids
-    )
+def _revlog_stats_since(cutoff: int, deck_ids: Optional[List[int]]):
+    return _revlog_stats_between(cutoff, progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff), deck_ids)
 
 
-def _revlog_stats_between(start: int, end: int, deck_ids: List[int]):
+def _revlog_stats_between(start: int, end: int, deck_ids: Optional[List[int]]):
+    if deck_ids is None:
+        return progress_scheduler.revlog_stats(mw.col.db, start, end, [], existing_cards_only=True)
     return progress_scheduler.revlog_stats(mw.col.db, start, end, deck_ids)
 
 
@@ -589,29 +613,16 @@ def _historical_seconds_per_card(today: int) -> Optional[float]:
     profile = getattr(getattr(mw, "pm", None), "profile", None)
     if not isinstance(profile, dict):
         return None
-
-    total_cards = 0
-    total_seconds = 0.0
-    for entry in history.read_history_records(profile):
-        if int(entry.get("day", 0)) >= today:
-            continue
-        cards = int(entry.get("cards", 0) or 0)
-        avg_seconds = float(entry.get("avg_seconds", 0.0) or 0.0)
-        if cards <= 0 or avg_seconds <= 0:
-            continue
-        total_cards += cards
-        total_seconds += avg_seconds * cards
-
-    if total_cards <= 0 or total_seconds <= 0:
-        return None
-    return total_seconds / total_cards
+    return history.historical_seconds_per_card(profile, today)
 
 
-def _pace_estimate_for_today(cards_today: int, seconds_today: float) -> Optional[Tuple[float, str]]:
+def _pace_estimate_for_today(
+    cards_today: int, seconds_today: float, *, today: Optional[int] = None,
+) -> Optional[Tuple[float, str]]:
     if cards_today >= _TODAY_PACE_MIN_CARDS and seconds_today > 0:
         return (float(seconds_today) / cards_today, "today")
 
-    historical_seconds = _historical_seconds_per_card(_current_day_stamp())
+    historical_seconds = _historical_seconds_per_card(_current_day_stamp() if today is None else today)
     if historical_seconds and historical_seconds > 0:
         return (historical_seconds, "history")
 
@@ -641,7 +652,10 @@ def _format_eta_time(seconds_remaining: int, tzinfo) -> str:
     display_tz = None if settings.use_system_timezone else tzinfo
     now = time.time()
     now_tz = datetime.fromtimestamp(now, tz=display_tz)
-    eta_dt = datetime.fromtimestamp(now + seconds_remaining, tz=display_tz)
+    try:
+        eta_dt = datetime.fromtimestamp(now + seconds_remaining, tz=display_tz)
+    except (OSError, OverflowError, ValueError):
+        return "N/A"
     eta_display = eta_dt.strftime("%I:%M %p")
     days_ahead = (eta_dt.date() - now_tz.date()).days
     if days_ahead > 0:
@@ -677,7 +691,11 @@ def _deck_breakdown_for_node(node, cards_per_minute: Optional[float], tzinfo):
     }
 
 
-def _update_breakdown_rows(target_nodes, cards_per_minute: Optional[float]) -> None:
+def _prepare_breakdown_rows() -> None:
+    target_nodes = _progress_state.pending_breakdown_nodes
+    if target_nodes is None:
+        return
+    cards_per_minute = _progress_state.last_cards_per_minute
     tzinfo = _current_tzinfo()
     _progress_state.latest_breakdown_rows = [
         _deck_breakdown_for_node(node, cards_per_minute, tzinfo) for node in target_nodes
@@ -685,13 +703,16 @@ def _update_breakdown_rows(target_nodes, cards_per_minute: Optional[float]) -> N
     _progress_state.latest_breakdown_summary = _build_breakdown_summary(
         _progress_state.latest_breakdown_rows, cards_per_minute, tzinfo
     )
-    _refresh_breakdown_dialog()
+    _progress_state.pending_breakdown_nodes = None
 
 
 def _refresh_breakdown_dialog() -> None:
     global _deck_breakdown_dialog
     if _deck_breakdown_dialog is not None:
         try:
+            if not _deck_breakdown_dialog.isVisible():
+                return
+            _prepare_breakdown_rows()
             _deck_breakdown_dialog.update_rows(
                 _progress_state.latest_breakdown_rows, _progress_state.latest_breakdown_summary
             )
@@ -788,6 +809,7 @@ def _open_deck_breakdown_dialog() -> None:
         except RuntimeError:
             _deck_breakdown_dialog = DeckBreakdownDialog(mw)
 
+    _prepare_breakdown_rows()
     _deck_breakdown_dialog.request_auto_fit()
     _deck_breakdown_dialog.update_rows(
         _progress_state.latest_breakdown_rows, _progress_state.latest_breakdown_summary
@@ -797,32 +819,32 @@ def _open_deck_breakdown_dialog() -> None:
     _deck_breakdown_dialog.activateWindow()
 
 
-def updatePB():
+def updatePB(deck_tree=None, *, day_cutoff: Optional[int] = None):
     # Get studied cards  and true retention stats. TODAY'S VALUES
 
     # If the progress bar isn't initialized yet, there's nothing to update.
-    if progress_ui.progressBar is None:
+    if progress_ui.progressBar is None or mw.col is None:
         return
 
-    a = progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff, 1)
+    if day_cutoff is None:
+        day_cutoff = mw.col.sched.day_cutoff
+    today_start = progress_scheduler.day_boundary_ms(day_cutoff, 1)
 
-    deck_tree = mw.col.sched.deck_due_tree()
-    if currDID is None:
+    if deck_tree is None:
+        deck_tree = mw.col.sched.deck_due_tree()
+    node = _find_node_by_id(deck_tree, currDID) if currDID is not None else None
+    if node is None:
         target_nodes = list(deck_tree.children)
+        deck_ids_for_query = None
     else:
-        node = _find_node_by_id(deck_tree, currDID)
-        if node is None:
-            target_nodes = list(deck_tree.children)
-        else:
-            target_nodes = [node]
+        target_nodes = [node]
+        deck_ids_for_query = _collect_deck_ids(node)
 
     target_decks = [node.deck_id for node in target_nodes]
-    deck_ids_for_query: List[int] = []
-    for node in target_nodes:
-        deck_ids_for_query.extend(_collect_deck_ids(node))
-    deck_ids_for_query = list(dict.fromkeys(deck_ids_for_query))  # preserve order, ensure uniqueness
 
-    stats_today = _revlog_stats_since(a, deck_ids_for_query)
+    stats_today = _revlog_stats_between(
+        today_start, progress_scheduler.day_boundary_ms(day_cutoff), deck_ids_for_query,
+    )
     if stats_today:
         cards, failed, flunked, passed, passed_supermature, flunked_supermature, thetime = stats_today
     else:
@@ -855,10 +877,10 @@ def updatePB():
         again = "N/A"
 
     # Yesterday-only metrics (strict previous day window)
-    y_start = progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff, 2)
-    y_end = a
-
-    stats_yesterday = _revlog_stats_between(y_start, y_end, deck_ids_for_query)
+    stats_yesterday = None
+    if settings.show_yesterday:
+        y_start = progress_scheduler.day_boundary_ms(day_cutoff, 2)
+        stats_yesterday = _revlog_stats_between(y_start, today_start, deck_ids_for_query)
     if stats_yesterday:
         (
             ycards,
@@ -934,7 +956,7 @@ def updatePB():
         ysecspeed_value = 0
         ysecspeed_display = "N/A"
 
-    pace_estimate = _pace_estimate_for_today(int(cards), float(thetime))
+    pace_estimate = _pace_estimate_for_today(int(cards), float(thetime), today=day_cutoff // 86400)
     if pace_estimate is not None:
         pace_seconds_per_card, _ = pace_estimate
         speed = 60.0 / pace_seconds_per_card
@@ -971,16 +993,17 @@ def updatePB():
     # ETA display using system timezone by default, or the configured offset when overridden
     eta_display = _format_eta_time(seconds_remaining, _current_tzinfo())
 
-    cutoff_seconds = 0
-    if mw.col is not None and getattr(mw.col, "sched", None) is not None:
-        try:
-            cutoff_seconds = max(0, int(round(mw.col.sched.day_cutoff - time.time())))
-        except Exception:
-            cutoff_seconds = 0
+    cutoff_seconds = max(0, int(round(day_cutoff - time.time())))
 
-    progress_scale = 1000
-    progress_max = int(round(weighted_total * progress_scale))
-    progress_value = int(round(weighted_done * progress_scale))
+    # Qt's range and value are signed 32-bit integers. Keep millipoint
+    # precision on typical decks and the same fill ratio on very large ones.
+    qt_max = (1 << 31) - 1
+    if weighted_total > qt_max / 1000:
+        progress_max = qt_max
+        progress_value = round(weighted_done / weighted_total * qt_max)
+    else:
+        progress_max = round(weighted_total * 1000)
+        progress_value = round(weighted_done * 1000)
 
     if progress_max <= 0:
         progress_ui.progressBar.setRange(0, 1)
@@ -1142,12 +1165,11 @@ def updatePB():
         progress_ui.apply_bar_style(warning_active)
         _warning_active = warning_active
 
-    progress_ui.update_progress_tooltip()
-
     _progress_state.last_cards_per_minute = speed if speed > 0 else None
-    _update_breakdown_rows(target_nodes, _progress_state.last_cards_per_minute)
+    _progress_state.pending_breakdown_nodes = target_nodes
+    _refresh_breakdown_dialog()
 
-    _persist_progress_snapshot()
+    _persist_progress_snapshot(day_cutoff=day_cutoff)
 
     progress_ui.nmApplyStyle()
 
@@ -1175,38 +1197,37 @@ def calcRawCounts(rev: int, lrn: int, new: int) -> int:
     return rev + lrn + new
 
 
-def updateCountsForAllDecks(updateTotal: bool) -> None:
-    """
-    Update counts.
-    After adding, editing or deleting cards (afterStateChange hook), updateTotal should be set to True to update
-    totalCount[] based on doneCount[] and remainCount[]. No card should have been answered before this hook is
-    triggered, so the change in remainCount[] should be caused by editing collection and therefore goes into
-    totalCount[].
-    When the user answer a card (showQuestion hook), updateTotal should be set to False to update doneCount[] based on
-    totalCount[] and remainCount[]. No change to collection should have been made before this hook is
-    triggered, so the change in remainCount[] should be caused by answering cards and therefore goes into
-    doneCount[].
-    In the later case, remainCount[] may still increase based on the weights of New, Lrn and Rev cards (see comments
-    of "Calculation weights" above), in which case totalCount[] may still get updated based on forceForward setting.
-    :param updateTotal: True for afterStateChange hook, False for showQuestion hook
-    """
+def updateCountsForAllDecks(updateTotal: bool, deck_tree=None, *, day_cutoff: Optional[int] = None) -> None:
+    """Read daily answers and buried cards once, then roll them up the deck tree."""
 
     if mw.col is None:
         return
 
-    _ensure_persisted_progress_loaded()
-    add_info()
-    today_cutoff = progress_scheduler.day_boundary_ms(mw.col.sched.day_cutoff, 1)
-    done_by_deck = _done_counts_by_deck_since(today_cutoff)
+    if day_cutoff is None:
+        day_cutoff = mw.col.sched.day_cutoff
+    _ensure_persisted_progress_loaded(day_cutoff)
+    add_info(day_cutoff=day_cutoff)
+    today_start = progress_scheduler.day_boundary_ms(day_cutoff, 1)
+    if deck_tree is None:
+        deck_tree = mw.col.sched.deck_due_tree()
+    selected = _find_node_by_id(deck_tree, currDID) if currDID is not None else None
+    done_by_deck = _done_counts_by_deck_since(
+        today_start, _collect_deck_ids(selected) if selected is not None else [], day_cutoff=day_cutoff,
+    )
+    deck_ids = [did for node in deck_tree.children for did in _collect_deck_ids(node)]
+    buried_by_deck = progress_scheduler.buried_counts_by_deck(
+        mw.col.db, mw.col.sched, deck_ids, day_cutoff=day_cutoff,
+    )
     active_queue_counts = _current_reviewer_queue_counts()
 
-    for node in mw.col.sched.deck_due_tree().children:
+    for node in deck_tree.children:
         updateCountsForTree(
             node,
             updateTotal,
             done_by_deck,
             active_deck_id=currDID,
             active_queue_counts=active_queue_counts,
+            buried_by_deck=buried_by_deck,
         )
 
 
@@ -1216,8 +1237,20 @@ def updateCountsForTree(
     done_by_deck: Dict[int, Tuple[int, int, int]],
     active_deck_id: Optional[int] = None,
     active_queue_counts: Optional[Tuple[int, int, int]] = None,
-) -> None:
+    buried_by_deck: Optional[Dict[int, progress_scheduler.QueueCounts]] = None,
+) -> Tuple[progress_scheduler.QueueCounts, progress_scheduler.QueueCounts]:
     did = node.deck_id
+    if buried_by_deck is None:
+        buried_by_deck = progress_scheduler.buried_counts_by_deck(mw.col.db, mw.col.sched, _collect_deck_ids(node))
+    done = done_by_deck.get(did, (0, 0, 0))
+    buried = buried_by_deck.get(did, (0, 0, 0))
+    for child in node.children:
+        child_done, child_buried = updateCountsForTree(
+            child, updateTotal, done_by_deck, active_deck_id, active_queue_counts, buried_by_deck,
+        )
+        done = progress_scheduler.add_counts(done, child_done)
+        buried = progress_scheduler.add_counts(buried, child_buried)
+
     (
         rev_count,
         lrn_count,
@@ -1226,17 +1259,8 @@ def updateCountsForTree(
         buried_lrn,
         buried_new,
     ) = _queue_counts_for_node(
-        node, active_queue_counts if did == active_deck_id else None
+        node, active_queue_counts if did == active_deck_id else None, buried_counts=buried,
     )
-
-    rev_done = 0
-    lrn_done = 0
-    new_done = 0
-    for deck_id in _collect_deck_ids(node):
-        rev_add, lrn_add, new_add = done_by_deck.get(deck_id, (0, 0, 0))
-        rev_done += rev_add
-        lrn_done += lrn_add
-        new_done += new_add
 
     actionableRevCount[did] = rev_count
     actionableLrnCount[did] = lrn_count
@@ -1248,16 +1272,10 @@ def updateCountsForTree(
     remain = calcProgress(rev_count, lrn_count, new_count)
     raw_remain = calcRawCounts(rev_count, lrn_count, new_count)
 
-    updateCountsForDeck(did, remain, raw_remain, rev_done, lrn_done, new_done, updateTotal)
-
-    for child in node.children:
-        updateCountsForTree(
-            child,
-            updateTotal,
-            done_by_deck,
-            active_deck_id=active_deck_id,
-            active_queue_counts=active_queue_counts,
-        )
+    updateCountsForDeck(did, remain, raw_remain, *done, updateTotal)
+    # Only database burials are additive. A selected parent's reviewer queue
+    # already accounts for any extra siblings hidden by its own scheduling rules.
+    return done, buried
 
 
 def updateCountsForDeck(
@@ -1283,6 +1301,16 @@ def updateCountsForDeck(
     else:
         totalCount[did] = doneCount[did] + remainCount[did]
         rawTotalCount[did] = rawDoneCount[did] + rawRemainCount[did]
+
+
+def _refresh_progress(update_total: bool) -> None:
+    """Count and display the same scheduler snapshot for this refresh."""
+    if progress_ui.progressBar is None or mw.col is None or mw.col.db is None:
+        return
+    deck_tree = mw.col.sched.deck_due_tree()
+    day_cutoff = mw.col.sched.day_cutoff
+    updateCountsForAllDecks(update_total, deck_tree=deck_tree, day_cutoff=day_cutoff)
+    updatePB(deck_tree, day_cutoff=day_cutoff)
 
 
 def afterStateChangeCallBack(state: str, oldState: str) -> None:
@@ -1325,18 +1353,12 @@ def afterStateChangeCallBack(state: str, oldState: str) -> None:
         if not progress_ui.progressBar:
             initPB()
 
-    # showInfo("updateCountsForAllDecks(True), currDID = %d" % (currDID if currDID else 0))
-    _ensure_persisted_progress_loaded()
-    updateCountsForAllDecks(True)  # see comments at updateCountsForAllDecks()
-    updatePB()
+    _refresh_progress(True)
 
 
 def showQuestionCallBack() -> None:
-    # showInfo("updateCountsForAllDecks(False), currDID = %d" % (currDID if currDID else 0))
-    if not settings.progress_bar_enabled or mw.col is None:
-        return
-    updateCountsForAllDecks(False)  # see comments at updateCountsForAllDecks()
-    updatePB()
+    if settings.progress_bar_enabled:
+        _refresh_progress(False)
 
 
 def _on_state_did_change(new_state: str, old_state: str) -> None:
@@ -1359,14 +1381,17 @@ def _on_operation_did_execute(changes: Any, _handler: Any) -> None:
         and progress_ui.progressBar is not None
         and mw.col is not None
     ):
-        updateCountsForAllDecks(True)
-        updatePB()
+        _refresh_progress(True)
 
 
 def _on_day_did_change() -> None:
-    if mw.col is not None and settings.progress_bar_enabled:
-        updateCountsForAllDecks(True)
-        updatePB()
+    if mw.col is None:
+        return
+    if progress_ui.progressBar is None:
+        if _progress_state.progress_restored:
+            _ensure_persisted_progress_loaded()
+    elif settings.progress_bar_enabled:
+        _refresh_progress(True)
 
 
 # The package supports Anki 2.1.49+, whose generated gui_hooks API replaces
@@ -1384,10 +1409,16 @@ if hasattr(gui_hooks, "day_did_change"):
 
 
 def _on_profile_did_open() -> None:
-    _prepare_counts_for_new_profile()
-    # Anki may already have shown Home before this hook. Keep the actual
-    # screen state so applying settings after a profile switch preserves it.
-    _progress_state.main_window_state = getattr(mw, "state", _current_main_window_state) or "deckBrowser"
+    global _current_main_window_state, currDID
+    # Anki can render Home before profile_did_open. The close hook already
+    # cleared the previous profile, so keep the new profile's first refresh.
+    _current_main_window_state = getattr(mw, "state", _current_main_window_state) or "deckBrowser"
+    _progress_state.main_window_state = _current_main_window_state
+    if _current_main_window_state in {"overview", "review"} and mw.col is not None:
+        currDID = mw.col.decks.current()["id"]
+    else:
+        currDID = None
+    _progress_state.current_deck_id = currDID
     add_info()
 
 
@@ -1406,6 +1437,8 @@ def _on_profile_will_close() -> None:
         if dialog is not None:
             try:
                 dialog.close()
+                if dialog is _deck_breakdown_dialog:
+                    dialog.deleteLater()
             except (AttributeError, RuntimeError):
                 pass
     _deck_breakdown_dialog = None
@@ -1420,6 +1453,15 @@ def _on_profile_will_close() -> None:
 
 register_once(gui_hooks.profile_did_open, _on_profile_did_open, "profile_did_open")
 register_once(gui_hooks.profile_will_close, _on_profile_will_close, "profile_will_close")
+
+
+def _on_sync_did_finish() -> None:
+    # Sync can import answers from earlier days. Recalculate on the next refresh.
+    _progress_state.weight_history_key = None
+
+
+if hasattr(gui_hooks, "sync_did_finish"):
+    register_once(gui_hooks.sync_did_finish, _on_sync_did_finish, "sync_did_finish")
 
 
 def _on_theme_did_change(*_args) -> None:
@@ -1481,6 +1523,9 @@ class SettingRow(QWidget):
         text_col.setSpacing(2)
 
         self.title_label = QLabel(title)
+        self.title_label.setBuddy(control)
+        control.setAccessibleName(title)
+        control.setAccessibleDescription(description)
         self.title_label.setStyleSheet(
             f"font-weight: 600; font-size: 13px; color: {palette['section_header_text']}; margin-bottom: 2px;"
         )
@@ -3288,7 +3333,10 @@ class ProgressBarConfigDialog(QDialog):
 
 def _open_config_dialog() -> None:
     dialog = ProgressBarConfigDialog(mw)
-    dialog.exec()
+    try:
+        dialog.exec()
+    finally:
+        dialog.deleteLater()
 
 
 def _open_session_history_dialog() -> None:
@@ -3299,6 +3347,7 @@ def _open_session_history_dialog() -> None:
         dialog.exec()
     finally:
         _session_history_dialog = None
+        dialog.deleteLater()
 
 
 def _reload_configuration_action() -> None:
@@ -3322,9 +3371,7 @@ def toggleProgressBar():
             initPB()
         if progress_ui.progressBar is not None:
             progress_ui.progressBar.show()
-            _ensure_persisted_progress_loaded()
-            updateCountsForAllDecks(True)
-            updatePB()
+            _refresh_progress(True)
         else:
             _remove_progress_bar()
     else:

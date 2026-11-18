@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import math
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from aqt import mw
 from aqt.qt import (
@@ -90,12 +90,11 @@ def _safe_number(value: Any, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
-def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
-    raw_history = profile.get(HISTORY_PROGRESS_KEY, [])
+def _history_rows(profile: Dict[str, Any]) -> Iterator[Tuple[int, Dict[str, Any]]]:
+    raw_history = profile.get(HISTORY_PROGRESS_KEY)
     if not isinstance(raw_history, list):
-        return []
+        return
 
-    normalized: List[Dict[str, Any]] = []
     for entry in raw_history:
         if not isinstance(entry, dict):
             continue
@@ -104,6 +103,12 @@ def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
             day_int = int(day)
         except (TypeError, ValueError, OverflowError):
             continue
+        yield day_int, entry
+
+
+def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for day_int, entry in _history_rows(profile):
         cards = max(0, int(_safe_number(entry.get("cards", 0))))
         avg_seconds = max(0.0, _safe_number(entry.get("avg_seconds", 0.0)))
         again = min(100.0, max(0.0, _safe_number(entry.get("again", 0.0))))
@@ -125,6 +130,29 @@ def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def historical_seconds_per_card(profile: Dict[str, Any], today: int) -> Optional[float]:
+    total_cards = 0
+    total_seconds = 0.0
+    # Counts and total recorded milliseconds both come from SQLite integer
+    # aggregates. Ignore impossible legacy samples before they reach the ETA.
+    max_sql_integer = 2**63 - 1
+    for day, entry in _history_rows(profile):
+        if day >= today:
+            continue
+        cards = int(_safe_number(entry.get("cards")))
+        if not 0 < cards <= max_sql_integer:
+            continue
+        seconds = _safe_number(entry.get("avg_seconds")) * cards
+        if not 0 < seconds <= max_sql_integer / 1000:
+            continue
+        # Allow rounding in reconstructing the original integer milliseconds.
+        if round(seconds * 1000) == 0:
+            continue
+        total_cards += cards
+        total_seconds += seconds
+    return total_seconds / total_cards if total_cards else None
+
+
 def format_history_day(day_stamp: int) -> str:
     try:
         return datetime.fromtimestamp(day_stamp * 86400).strftime("%Y-%m-%d")
@@ -135,8 +163,8 @@ def format_history_day(day_stamp: int) -> str:
 def calculate_today_history_entry(
     day_stamp: int,
     day_cutoff: int,
-    deck_ids_for_query: List[int],
-    stats_between: Callable[[int, int, List[int]], Optional[tuple]],
+    deck_ids_for_query: Optional[List[int]],
+    stats_between: Callable[[int, int, Optional[List[int]]], Optional[tuple]],
 ) -> Optional[Dict[str, Any]]:
     day_start = day_boundary_ms(day_cutoff, 1)
     day_end = day_boundary_ms(day_cutoff)
@@ -178,25 +206,43 @@ def calculate_today_history_entry(
 def update_daily_history(
     profile: Dict[str, Any],
     day_stamp: int,
-    deck_ids_for_query: List[int],
-    stats_between: Callable[[int, int, List[int]], Optional[tuple]],
-) -> None:
+    deck_ids_for_query: Optional[List[int]],
+    stats_between: Callable[[int, int, Optional[List[int]]], Optional[tuple]],
+    *,
+    day_cutoff: Optional[int] = None,
+    previous_records: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[List[Dict[str, Any]]]:
     if day_stamp <= 0:
-        return
+        return None
 
-    entry = calculate_today_history_entry(day_stamp, mw.col.sched.day_cutoff if mw.col else 0, deck_ids_for_query, stats_between)
+    if day_cutoff is None:
+        day_cutoff = mw.col.sched.day_cutoff if mw.col else 0
+    entry = calculate_today_history_entry(day_stamp, day_cutoff, deck_ids_for_query, stats_between)
     if entry is None:
-        return
+        return None
+
+    history_days = getattr(config.settings, "history_days", 0)
+    if (
+        previous_records
+        and previous_records is profile.get(HISTORY_PROGRESS_KEY)
+        and isinstance(previous_records[0], dict)
+        and previous_records[0].get("day") == day_stamp
+    ):
+        # This list was already normalized and sorted by the preceding save.
+        previous_records[0] = entry
+        if history_days > 0:
+            del previous_records[history_days:]
+        return previous_records
 
     history = read_history_records(profile)
     history = [item for item in history if item.get("day") != day_stamp]
     history.append(entry)
     history.sort(key=lambda item: item.get("day", 0), reverse=True)
-    history_days = getattr(config.settings, "history_days", 0)
     if history_days > 0:
         history = history[: history_days]
 
     profile[HISTORY_PROGRESS_KEY] = history
+    return history
 
 
 class SessionHistoryDialog(QDialog):

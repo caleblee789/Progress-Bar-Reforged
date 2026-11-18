@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
 QueueCounts = Tuple[int, int, int]
@@ -13,8 +13,16 @@ ANSWER_FILTER = "r.ease between 1 and 4 and r.type in (0, 1, 2, 3)"
 def day_boundary_ms(day_cutoff: int, days_ago: int = 0) -> int:
     """Move between local scheduler cutoffs, including 23/25-hour days."""
 
+    if days_ago == 0:
+        return int(day_cutoff * 1000)
     cutoff = datetime.fromtimestamp(day_cutoff)
-    return int((cutoff - timedelta(days=days_ago)).timestamp() * 1000)
+    try:
+        return int((cutoff - timedelta(days=days_ago)).timestamp() * 1000)
+    except (OverflowError, OSError, ValueError):
+        if days_ago > 0:
+            # An oversized history lookback includes every possible Anki answer.
+            return 0
+        raise
 
 
 def historical_weights(db: Any, start: int, end: int) -> Tuple[float, float, float]:
@@ -41,6 +49,15 @@ def historical_weights(db: Any, start: int, end: int) -> Tuple[float, float, flo
 
 def _normalized_counts(counts: Tuple[Any, Any, Any]) -> QueueCounts:
     return tuple(max(0, int(value or 0)) for value in counts)  # type: ignore[return-value]
+
+
+def add_counts(first: QueueCounts, second: QueueCounts) -> QueueCounts:
+    return first[0] + second[0], first[1] + second[1], first[2] + second[2]
+
+
+def _deck_ids_sql(deck_ids: Iterable[int]) -> str:
+    # An integer-only IN list also works on SQLite builds with a 999-bind limit.
+    return ",".join(str(int(deck_id)) for deck_id in deck_ids)
 
 
 def queued_cards_counts(queued_cards: Any) -> Optional[QueueCounts]:
@@ -100,15 +117,20 @@ def reconcile_queue_counts(
 def completed_counts_by_deck(
     db: Any, cutoff: int, end: Optional[int] = None,
     *, current_deck: Optional[int] = None,
+    current_deck_ids: Optional[List[int]] = None,
 ) -> Dict[int, Tuple[int, int, int]]:
     range_sql = "r.id >= ?" if end is None else "r.id >= ? and r.id < ?"
     params = [cutoff] if end is None else [cutoff, end]
     deck_expression = "coalesce(nullif(c.odid, 0), c.did)"
-    if current_deck is not None:
-        # In a selected filtered deck, match the cards used by its time and
-        # retention queries. Keep one attribution per answer for home totals.
-        deck_expression = f"case when c.did = ? then c.did else {deck_expression} end"
-        params.insert(0, current_deck)
+    if current_deck_ids is None and current_deck is not None:
+        current_deck_ids = [current_deck]
+    if current_deck_ids:
+        # Include cards currently in a selected filtered deck or one of its
+        # subdecks, matching revlog_stats while attributing each answer once.
+        deck_expression = (
+            f"case when c.did in ({_deck_ids_sql(current_deck_ids)}) then c.did "
+            f"else {deck_expression} end"
+        )
     rows = db.all(
         f"""
         select {deck_expression} as deck_id,
@@ -126,49 +148,58 @@ def completed_counts_by_deck(
     }
 
 
+def buried_counts_by_deck(
+    db: Any, sched: Any, deck_ids: List[int], *, day_cutoff: Optional[int] = None,
+) -> Dict[int, QueueCounts]:
+    """Read due buried cards once per refresh using the deck/queue index."""
+    if not deck_ids:
+        return {}
+
+    scheduler_day = getattr(sched, "today", None)
+    today = int(scheduler_day or 0)
+    if day_cutoff is None:
+        day_cutoff = int(getattr(sched, "day_cutoff", 0) or 0)
+    if scheduler_day is None and day_cutoff > 0:
+        today = day_cutoff // 86400
+    rows = db.all(
+        f"""
+        select did,
+               sum(case when type = 2 and due <= ? then 1 else 0 end),
+               sum(case when type in (1, 3)
+                        and (case when due < 1000000000 then due <= ? else due < ? end) then 1 else 0 end),
+               sum(case when type = 0 then 1 else 0 end)
+        from cards where queue in (-2, -3) and did in ({_deck_ids_sql(deck_ids)})
+        group by did
+        """,
+        today, today, day_cutoff,
+    )
+    return {int(did): (rev, lrn, new) for did, rev, lrn, new in rows}
+
+
 def queue_counts_for_node(
     db: Any,
     sched: Any,
     node: Any,
     collect_deck_ids: Callable[[Any], List[int]],
     active_queue_counts: Optional[QueueCounts] = None,
+    *,
+    buried_counts: Optional[QueueCounts] = None,
 ) -> Tuple[int, int, int, int, int, int]:
     """Return scheduler-authoritative actionable and separately buried counts."""
-
-    deck_ids = list(dict.fromkeys(collect_deck_ids(node)))
-    sched_rev = int(getattr(node, "review_count", 0) or 0)
-    sched_lrn = int(getattr(node, "learn_count", 0) or 0)
-    sched_new = int(getattr(node, "new_count", 0) or 0)
-    if not deck_ids:
-        return reconcile_queue_counts(
-            (sched_rev, sched_lrn, sched_new), (0, 0, 0), active_queue_counts
-        )
-
-    scheduler_day = getattr(sched, "today", None)
-    today = int(scheduler_day or 0)
-    day_cutoff = int(getattr(sched, "day_cutoff", 0) or 0)
-    if scheduler_day is None and day_cutoff > 0:
-        today = day_cutoff // 86400
-    placeholders = ",".join(["?"] * len(deck_ids))
-    counts = db.first(
-        f"""
-        select sum(case when queue in (-2, -3) and type = 2 and due <= ? then 1 else 0 end),
-               sum(case when queue in (-2, -3) and type in (1, 3)
-                        and (case when due < 1000000000 then due <= ? else due < ? end) then 1 else 0 end),
-               sum(case when queue in (-2, -3) and type = 0 then 1 else 0 end)
-        from cards where queue in (-2, -3) and did in ({placeholders})
-        """,
-        today, today, day_cutoff, *deck_ids,
-    ) or (0, 0, 0)
-    buried_rev, buried_lrn, buried_new = _normalized_counts(counts)
+    if buried_counts is None:
+        buried_counts = (0, 0, 0)
+        for counts in buried_counts_by_deck(db, sched, collect_deck_ids(node)).values():
+            buried_counts = add_counts(buried_counts, counts)
     return reconcile_queue_counts(
-        (sched_rev, sched_lrn, sched_new),
-        (buried_rev, buried_lrn, buried_new),
+        (getattr(node, "review_count", 0), getattr(node, "learn_count", 0), getattr(node, "new_count", 0)),
+        buried_counts,
         active_queue_counts,
     )
 
 
-def revlog_stats(db: Any, start: int, end: int | None, deck_ids: List[int]):
+def revlog_stats(
+    db: Any, start: int, end: int | None, deck_ids: List[int], *, existing_cards_only: bool = False,
+):
     """Aggregate actual answers in ``[start, end)`` with fractional seconds."""
 
     base = """
@@ -183,9 +214,11 @@ def revlog_stats(db: Any, start: int, end: int | None, deck_ids: List[int]):
     range_sql = "r.id >= ?" if end is None else "r.id >= ? and r.id < ?"
     range_sql += " and " + ANSWER_FILTER
     params: List[int] = [start] if end is None else [start, end]
+    if deck_ids or existing_cards_only:
+        base += " join cards c on c.id = r.cid"
     if not deck_ids:
         return db.first(base + " where " + range_sql, *params)
-    placeholders = ",".join(["?"] * len(deck_ids))
-    query = base + f""" join cards c on c.id = r.cid where {range_sql}
-        and (c.did in ({placeholders}) or (c.odid != 0 and c.odid in ({placeholders})))"""
-    return db.first(query, *params, *deck_ids, *deck_ids)
+    selected = _deck_ids_sql(deck_ids)
+    query = base + f""" where {range_sql}
+        and (c.did in ({selected}) or (c.odid != 0 and c.odid in ({selected})))"""
+    return db.first(query, *params)

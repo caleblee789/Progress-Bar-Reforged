@@ -490,15 +490,7 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
 
     history_days = _int("history_days", 30, minimum=0)
 
-    if mode == "simple":
-        show_percent = True
-        show_number = True
-        show_again = False
-        show_retention = False
-        show_super_mature_retention = False
-        show_yesterday = False
-        show_debug = False
-    elif mode == "time_left":
+    if mode in {"simple", "time_left"}:
         show_percent = True
         show_number = True
         show_again = False
@@ -511,16 +503,15 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         show_number = True
         show_again = True
         show_retention = True
-        show_super_mature_retention = bool(show_super_mature_retention)
         show_yesterday = True
 
+    # Keep the saved SMTR preference from _bool() when a mode hides the metric.
     normalized.update(
         {
             "show_percent": show_percent,
             "show_number": show_number,
             "show_again": show_again,
             "show_retention": show_retention,
-            "show_super_mature_retention": show_super_mature_retention,
             "show_yesterday": show_yesterday,
             "show_debug": show_debug,
         }
@@ -615,12 +606,11 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
         },
     }
 
-    restrict_size = ""
     size_parts = []
     if max_width:
         size_parts.append(f"max-width: {max_width};" if orientation == Qt.Orientation.Horizontal else f"max-height: {max_width};")
-    if min_height:
-        size_parts.append(f"min-height: {min_height};" if orientation == Qt.Orientation.Horizontal else f"min-width: {min_height};")
+    thickness_property = "min-height" if orientation == Qt.Orientation.Horizontal else "min-width"
+    size_parts.append(f"{thickness_property}: {min_height or '22px'};")
     if bar_height:
         size_parts.append(f"height: {bar_height};" if orientation == Qt.Orientation.Horizontal else f"width: {bar_height};")
     if padding:
@@ -628,7 +618,6 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     if font_size:
         size_parts.append(f"font-size: {font_size};")
     size_parts.append("font-weight: 600;")
-    size_parts.append("min-height: 22px;" if orientation == Qt.Orientation.Horizontal else "min-width: 22px;")
     restrict_size = " ".join(size_parts)
 
     default_stylesheet = (

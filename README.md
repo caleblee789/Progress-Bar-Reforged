@@ -3,7 +3,14 @@ Progress Bar Reforged for Anki
 
 Progress Bar Reforged adds a progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
 
-Current release: **v1.1.7**. [Install from AnkiWeb](https://ankiweb.net/shared/info/1511983907) with code `1511983907`, or download `progress_bar_time_left.ankiaddon` from the [latest GitHub release](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+**v1.1.8** is available as an [installable package](dist/progress_bar_time_left.ankiaddon). Published releases are also available on [AnkiWeb](https://ankiweb.net/shared/info/1511983907) (code `1511983907`) and [GitHub](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+
+What's new in v1.1.8
+--------------------
+
+* **Faster reviews in large collections.** In a warm Advanced mode benchmark on Anki 26.11b1 with 125 synthetic decks, 10,000 cards, and 30,000 prior reviews, the median progress bar refresh fell from 10.14 ms to 3.91 ms. Database reads per question fell from 128 to 4. The benchmark used Anki's scheduler and offscreen Qt widgets.
+* **More accurate daily history.** When Anki stays open across study days, history includes answers recorded just before rollover. Review weights also refresh after syncing.
+* **Settings that stick.** Switching between Simple and Advanced modes preserves your super-mature retention preference, and the bar respects its configured minimum thickness.
 
 What's new in v1.1.7
 --------------------

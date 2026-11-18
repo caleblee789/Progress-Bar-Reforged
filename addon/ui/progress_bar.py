@@ -56,13 +56,12 @@ class _ProgressBarInteractionFilter(QObject):
         if _click_handler is None:
             return False
 
-        if event.type() == QEvent.Type.MouseButtonRelease and event.button() in (
-            Qt.MouseButton.LeftButton,
-            Qt.MouseButton.RightButton,
-        ):
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
             _click_handler()
             return True
         if event.type() == QEvent.Type.ContextMenu:
+            # Qt sends this even when the preceding right-click was handled.
+            # It also covers the platform's keyboard context-menu shortcut.
             _click_handler()
             return True
         if event.type() in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
@@ -97,8 +96,12 @@ class SegmentedProgressBar(QProgressBar):
     def setSegmentData(
         self, new_total: int, lrn_total: int, rev_total: int, progress_fraction: float
     ) -> None:
-        self._segment_counts = (max(0, new_total), max(0, lrn_total), max(0, rev_total))
-        self._progress_fraction = max(0.0, min(1.0, progress_fraction))
+        counts = (max(0, new_total), max(0, lrn_total), max(0, rev_total))
+        fraction = max(0.0, min(1.0, progress_fraction))
+        if counts == self._segment_counts and fraction == self._progress_fraction:
+            return
+        self._segment_counts = counts
+        self._progress_fraction = fraction
         self.update()
 
     def _draw_segments_horizontal(self, painter: QPainter, rect: QRect, palette, inverted: bool = False) -> None:
@@ -193,6 +196,9 @@ class SegmentedProgressBar(QProgressBar):
             painter.fillRect(seg_rect, self._segment_colors.get(name, palette.color(palette.ColorRole.Highlight)))
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
+        if self.minimum() == 0 and self.maximum() == 0:
+            super().paintEvent(event)
+            return
         option = QStyleOptionProgressBar()
         self.initStyleOption(option)
         painter = QStylePainter(self)
@@ -241,7 +247,7 @@ def init_progress_bar() -> None:
     progressBar.setInvertedAppearance(config.settings.invert_progress)
     progressBar.setOrientation(config.settings.orientation)
     progressBar.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-    progressBar.setAccessibleName("Progress_Bar_Reforged")
+    progressBar.setAccessibleName("Progress Bar Reforged")
     progressBar.setAccessibleDescription(
         "Shows current review progress. Press Enter or Space to open the deck breakdown."
     )
@@ -269,17 +275,7 @@ def init_progress_bar() -> None:
         mw.web.setFocus()
         return
 
-    dock = _dock(progressBar)
-    progress_dock = dock
-    if hasattr(mw, "docks") and dock not in getattr(mw, "docks", []):
-        try:
-            mw.docks.append(dock)
-        except Exception:
-            pass
-    if hasattr(mw, "docks") and not getattr(mw, "docks", []):
-        fallback_dock = QDockWidget()
-        fallback_dock.setObjectName("pbDock")
-        mw.addDockWidget(config.settings.dock_area, fallback_dock)
+    progress_dock = _dock(progressBar)
 
 
 def _dock(pb: QProgressBar) -> QDockWidget:
@@ -367,11 +363,11 @@ def set_scrolling_bar_state() -> None:
     """Make progress bar in waiting style if the state is resetRequired (happened after editing cards.)"""
     if progressBar is None or config.settings is None:
         return
+    progressBar._progress_label_variants = None
     progressBar.setRange(0, 0)
+    progressBar.setAccessibleDescription("Waiting for Anki to refresh the review queue.")
     if config.settings.show_number:
         progressBar.setFormat("Waiting...")
-    update_progress_tooltip()
-    nmApplyStyle()
 
 
 def update_toggle_shortcut(on_toggle) -> None:

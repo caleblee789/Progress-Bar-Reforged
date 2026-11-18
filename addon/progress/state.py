@@ -28,8 +28,11 @@ class ProgressState:
     progress_restored: bool = False
     last_snapshot: Optional[Dict[str, Any]] = None
     last_persisted_ts: float = 0.0
+    last_history_cutoff: Optional[int] = None
+    last_history_records: Optional[List[Dict[str, Any]]] = None
     latest_breakdown_rows: List[Dict[str, Any]] = field(default_factory=list)
     latest_breakdown_summary: Optional[Dict[str, Any]] = None
+    pending_breakdown_nodes: Optional[List[Any]] = None
     last_cards_per_minute: Optional[float] = None
     weight_history_key: Optional[tuple[int, int, int]] = None
 
@@ -47,7 +50,10 @@ class ProgressState:
         self.restored_day_stamp = None
         self.last_snapshot = None
         self.last_persisted_ts = 0.0
+        self.last_history_cutoff = None
+        self.last_history_records = None
         self.latest_breakdown_rows = []
         self.latest_breakdown_summary = None
+        self.pending_breakdown_nodes = None
         self.last_cards_per_minute = None
         self.weight_history_key = None

@@ -354,6 +354,14 @@ def test_settings_dialog_save_uses_packaged_addon_id(addon_module):
     mod = addon_module
 
     dialog = mod.ProgressBarConfigDialog(mod.mw)
+    for control, name in (
+        (dialog.display_location_combo, "Show On"),
+        (dialog.mode_combo, "Mode"),
+        (dialog.dock_area_combo, "Position"),
+        (dialog.theme_combo, "Theme"),
+    ):
+        assert control._accessible_name == name
+        assert control._accessible_description
     dialog.progress_bar_enabled_cb.setChecked(False)
     dialog._save_and_close()
 
@@ -796,7 +804,7 @@ def test_progress_bar_custom_colors_remain_authoritative(addon_module):
 
 def test_queue_counts_for_node_uses_deck_tree_for_actionable_and_sql_for_buried(addon_module):
     mod = addon_module
-    mod.mw.col.db = SequenceDB(first_rows=[(1, 2, 6)])
+    mod.mw.col.db = SequenceDB(all_rows=[(1, 1, 2, 6)])
 
     child = DeckNode(2)
     node = DeckNode(1, [child])
@@ -809,7 +817,7 @@ def test_queue_counts_for_node_uses_deck_tree_for_actionable_and_sql_for_buried(
 
 def test_queue_counts_match_active_reviewer_queue_and_move_hidden_siblings_to_buried(addon_module):
     mod = addon_module
-    mod.mw.col.db = SequenceDB(first_rows=[(1, 0, 2)])
+    mod.mw.col.db = SequenceDB(all_rows=[(1, 1, 0, 2)])
 
     node = DeckNode(1)
     node.review_count = 5
@@ -1234,6 +1242,10 @@ def test_duration_formatting_rounds_elapsed_down_and_estimates_up(addon_module):
         assert addon_module._format_duration(seconds, remaining=True) == remaining
 
 
+def test_unrepresentable_finish_date_displays_unavailable(addon_module):
+    assert addon_module._format_eta_time(10**15, addon_module._current_tzinfo()) == "N/A"
+
+
 def test_simple_home_bar_does_not_show_seeded_eta(addon_module):
     mod = addon_module
 
@@ -1499,7 +1511,7 @@ def test_progress_bar_keyboard_activation_and_accessibility(addon_module):
     progress_ui.set_click_handler(lambda: calls.append("opened"))
 
     assert progress_ui.progressBar._focus_policy == Qt.FocusPolicy.StrongFocus
-    assert progress_ui.progressBar._accessible_name == "Progress_Bar_Reforged"
+    assert progress_ui.progressBar._accessible_name == "Progress Bar Reforged"
     assert "deck breakdown" in progress_ui.progressBar._accessible_description
 
     override = QEvent(QEvent.Type.ShortcutOverride, key=Qt.Key.Key_Return)
@@ -1513,6 +1525,22 @@ def test_progress_bar_keyboard_activation_and_accessibility(addon_module):
     space_event = QEvent(QEvent.Type.KeyPress, key=Qt.Key.Key_Space)
     assert progress_ui.interaction_filter.eventFilter(progress_ui.progressBar, space_event) is True
     assert calls == ["opened", "opened"]
+
+
+@pytest.mark.parametrize("context_first", (True, False))
+def test_progress_bar_right_click_activates_once(addon_module, context_first):
+    from addon.ui import progress_bar as progress_ui
+    from tests.stubs import QEvent, Qt
+
+    addon_module._apply_config({})
+    addon_module.initPB()
+    calls = []
+    progress_ui.set_click_handler(lambda: calls.append("opened"))
+    release = QEvent(QEvent.Type.MouseButtonRelease, button=Qt.MouseButton.RightButton)
+    context = QEvent(QEvent.Type.ContextMenu)
+    for event in ((context, release) if context_first else (release, context)):
+        progress_ui.interaction_filter.eventFilter(progress_ui.progressBar, event)
+    assert calls == ["opened"]
 
 
 @pytest.mark.parametrize("mode", ("simple", "stats"))
@@ -1752,7 +1780,24 @@ def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
     assert manifest["package"] == "1511983907"
     assert manifest["min_point_version"] == 49
     assert manifest["max_point_version"] == 260500
-    assert manifest["human_version"] == "1.1.7"
+    assert manifest["human_version"] == "1.1.8"
+
+
+def test_package_builder_is_reproducible_across_checkout_timestamps(tmp_path, monkeypatch):
+    import os
+    from scripts import package_addon
+
+    source = tmp_path / "addon"
+    source.mkdir()
+    (source / "meta.json").write_text('{"name": "Progress Bar Reforged"}')
+    runtime = source / "__init__.py"
+    runtime.write_text("# Same source bytes in both checkouts.\n")
+    monkeypatch.setattr(package_addon, "ADDON_DIR", source)
+    os.utime(runtime, (1600000000, 1600000000))
+    first = package_addon.build_package(tmp_path / "first.ankiaddon", mod_time=123)
+    os.utime(runtime, (1700000000, 1700000000))
+    second = package_addon.build_package(tmp_path / "second.ankiaddon", mod_time=123)
+    assert first.read_bytes() == second.read_bytes()
 
 
 def test_minimum_advertised_anki_version_uses_modern_gui_hooks(addon_module):
@@ -2384,6 +2429,19 @@ def test_empty_queues_render_as_complete_without_division_errors(addon_module):
 
     assert mod.progressBar._range == (0, 1)
     assert mod.progressBar._value == 1
+
+
+def test_large_workload_preserves_fill_within_qt_integer_range(addon_module):
+    mod = addon_module
+    setup_progress_update(mod, {"mode": "simple"})
+    seed_progress_counts(mod, done=1_000_000, remain=2_000_000)
+
+    mod.updatePB()
+
+    maximum = mod.progressBar._range[1]
+    assert 0 < maximum <= (1 << 31) - 1
+    assert mod.progressBar._value / maximum == pytest.approx(1 / 3)
+    assert mod.progressBar.format() == "1000000/3000000 (33%)"
 
 
 def test_auto_theme_change_rethemes_open_surfaces(addon_module, monkeypatch):

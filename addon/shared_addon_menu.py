@@ -18,20 +18,30 @@ ADDONS = (
 )
 _LOG = logging.getLogger(__name__)
 _STATE_ATTRIBUTE = "_caleb_m_shared_footer_v1"
+_ADDON_IDS = {addon_id for addon_id, *_ in ADDONS}
+_IDENTITIES = {
+    identity.casefold(): addon_id
+    for addon_id, _label, _url, aliases in ADDONS
+    for identity in (addon_id, *aliases)
+}
 
 
 def _installed_addons(manager, hosts):
     installed = set(hosts)
-    identities = {
-        identity.casefold(): addon_id
-        for addon_id, _label, _url, aliases in ADDONS
-        for identity in (addon_id, *aliases)
-    }
+    if _ADDON_IDS <= installed:
+        return installed
+    unknown = []
     for package in manager.allAddons():
-        known = identities.get(str(package).casefold())
+        known = _IDENTITIES.get(str(package).casefold())
         if known is None:
-            metadata = manager.addonMeta(package)
-            known = identities.get(str(metadata.get("name", "")).casefold())
+            unknown.append(package)
+        else:
+            installed.add(known)
+    for package in unknown:
+        if _ADDON_IDS <= installed:
+            break
+        metadata = manager.addonMeta(package)
+        known = _IDENTITIES.get(str(metadata.get("name", "")).casefold())
         if known is not None:
             installed.add(known)
     return installed
@@ -68,15 +78,18 @@ def install_shared_menu_footer(menu, main_window, host_id):
             "actions": (discovery_separator, discovery.menuAction(), support_separator, support),
             "discovery": discovery,
             "discovery_failed": False,
+            "missing": None,
         }
         setattr(menu, _STATE_ATTRIBUTE, state)
 
         def refresh():
             # Older versions and other add-ons may append settings after us.
             # Moving only our actions preserves every existing settings action.
-            for action in state["actions"]:
-                menu.removeAction(action)
-                menu.addAction(action)
+            footer = state["actions"]
+            if tuple(menu.actions()[-len(footer):]) != footer:
+                for action in footer:
+                    menu.removeAction(action)
+                    menu.addAction(action)
             try:
                 installed = _installed_addons(main_window.addonManager, state["hosts"])
                 missing = [item for item in ADDONS if item[0] not in installed]
@@ -86,6 +99,9 @@ def install_shared_menu_footer(menu, main_window, host_id):
                 if not state["discovery_failed"]:
                     _LOG.warning("Unable to discover installed add-ons; hiding recommendations", exc_info=True)
                 state["discovery_failed"] = True
+            if state["missing"] == missing:
+                return
+            state["missing"] = missing
             discovery.clear()
             for addon_id, label, url, _aliases in missing:
                 action = QAction(label, discovery)
@@ -100,4 +116,3 @@ def install_shared_menu_footer(menu, main_window, host_id):
         state["refresh"] = refresh
         menu.aboutToShow.connect(refresh)
     state["hosts"].add(host_id)
-    state["refresh"]()
