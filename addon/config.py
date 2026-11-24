@@ -10,8 +10,6 @@ from aqt.qt import QColor, QPalette, QStyle, QStyleFactory, Qt
 
 from .nightmode import isnightmode
 
-PACKAGE_ID = "1511983907"
-CONFIG_KEY = PACKAGE_ID
 LEGACY_WARNING_KEYS = {
     "warnings_enabled",
     "pace_warnings_enabled",
@@ -24,9 +22,9 @@ LEGACY_SETTING_KEYS = set(LEGACY_WARNING_KEYS)
 
 
 def config_key() -> str:
-    """Return the Anki add-on package key used for config persistence."""
+    """Use the installed folder name so source copies keep their own settings."""
 
-    return CONFIG_KEY
+    return __package__.split(".", 1)[0]
 
 
 def read_config(mw) -> Dict[str, Any]:
@@ -218,11 +216,14 @@ settings = None  # type: ignore[assignment]
 validation_errors: List[str] = []
 
 
-def _refresh_default_colors(saved: Dict[str, Any], previous: Dict[str, str], current: Dict[str, str]) -> Dict[str, Any]:
+def _refresh_default_colors(
+    saved: Dict[str, Any], current: Dict[str, str], *previous_palettes: Dict[str, str]
+) -> Dict[str, Any]:
     # A single customized color protects the entire set, including unchanged
     # companions. Geometry and opacity are never part of color migration.
-    if all(saved.get(key) == value for key, value in previous.items()):
-        return {**saved, **current}
+    for previous in previous_palettes:
+        if all(saved.get(key) == value for key, value in previous.items()):
+            return {**saved, **current}
     return saved
 
 
@@ -543,13 +544,15 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
 
     day_overrides = _refresh_default_colors(
         day_overrides,
-        {"text": "#111827", "background": "#e7edf3", "foreground": "#0e7490"},
         bar_colors(LIGHT),
+        {"text": "#111827", "background": "#e7edf3", "foreground": "#0e7490"},
+        {"text": "#111827", "background": "#e7edf3", "foreground": "#6389b3"},
     )
     night_overrides = _refresh_default_colors(
         night_overrides,
-        {"text": "aliceblue", "background": "rgba(39, 40, 40, 1)", "foreground": "#3399cc"},
         bar_colors(DARK),
+        {"text": "aliceblue", "background": "rgba(39, 40, 40, 1)", "foreground": "#3399cc"},
+        {"text": "#f1f5f9", "background": "#111827", "foreground": "#396fa8"},
     )
 
     day_theme = _validate_theme(day_overrides, default_day, "appearance.day", errors)
@@ -567,8 +570,9 @@ def load_settings(mw) -> Tuple[Settings, List[str]]:
     default_segment_colors = dark_segments if theme_is_night else light_segments
     # The previous common defaults equal the Light set. Recognize both built-in
     # sets so Auto can follow Anki while any customized set stays authoritative.
-    for built_in in (light_segments, dark_segments):
-        segment_color_config = _refresh_default_colors(segment_color_config, built_in, default_segment_colors)
+    segment_color_config = _refresh_default_colors(
+        segment_color_config, default_segment_colors, light_segments, dark_segments
+    )
     segment_colors = {
         "new": _color_or_default(segment_color_config.get("new"), default_segment_colors["new"], "segment_colors.new", errors),
         "learning": _color_or_default(segment_color_config.get("learning"), default_segment_colors["learning"], "segment_colors.learning", errors),

@@ -33,6 +33,6 @@ The displayed completion percentage always uses raw counts: completed answers di
 
 ETA uses measured review time, never weights or learning-step counts. Before five answers today, it uses the answer-weighted average of usable retained daily history; afterward, it uses today's recorded seconds per answer. Without either estimate it displays N/A. Anki's recorded time may be capped by the deck's answer-time limit.
 
-Completed answers follow the cards' current deck ownership, with original-deck attribution for filtered cards in Home totals. A selected filtered deck uses its currently contained cards consistently for counts and statistics. Anki's revlog has no deck ID, so historical deck attribution cannot be reconstructed after moves, return from a filtered deck, or deletion. Those scope changes can change progress.
+Home totals credit filtered cards to their original decks. A selected filtered deck only counts answers the add-on recorded there, including answers after which Anki returned the cards to their original decks. Untracked answers count toward the original deck because Anki's review log does not identify where they were given.
 
 Advanced labels refit when the dock is resized, including a bar retained between Home and Review. Spacing is reduced before falling back to compact text at narrow widths; click the bar to open Deck Breakdown.

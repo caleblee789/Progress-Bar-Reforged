@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
 QueueCounts = Tuple[int, int, int]
+FilteredAnswers = Dict[int, Tuple[int, int]]  # revlog ID -> (card ID, filtered deck ID)
 ANSWER_FILTER = "r.ease between 1 and 4 and r.type in (0, 1, 2, 3)"
 
 
@@ -58,6 +59,38 @@ def add_counts(first: QueueCounts, second: QueueCounts) -> QueueCounts:
 def _deck_ids_sql(deck_ids: Iterable[int]) -> str:
     # An integer-only IN list also works on SQLite builds with a 999-bind limit.
     return ",".join(str(int(deck_id)) for deck_id in deck_ids)
+
+
+def latest_answer_id(db: Any, card_id: int) -> Optional[int]:
+    row = db.first(
+        f"select r.id from revlog r where r.cid = ? and {ANSWER_FILTER} order by r.id desc limit 1",
+        card_id,
+    )
+    return row[0] if row else None
+
+
+def _answer_deck_sql(
+    deck_ids: List[int], start: int, end: Optional[int], filtered_answers: Optional[FilteredAnswers],
+) -> str:
+    original_deck = "coalesce(nullif(c.odid, 0), c.did)"
+    if not deck_ids or not filtered_answers:
+        return original_deck
+
+    selected = set(deck_ids)
+    by_deck: Dict[int, List[str]] = {}
+    for log_id, (card_id, deck_id) in filtered_answers.items():
+        if deck_id in selected and log_id >= start and (end is None or log_id < end):
+            by_deck.setdefault(deck_id, []).append(f"({int(log_id)},{int(card_id)})")
+
+    # Match the exact surviving answer, so undo removes it from totals. If the
+    # card moves to a different filter, a known answer keeps its original scope.
+    if not by_deck:
+        return original_deck
+    cases = [
+        f"when (r.id, r.cid) in (values {','.join(answers)}) then {int(deck_id)}"
+        for deck_id, answers in by_deck.items()
+    ]
+    return f"case {' '.join(cases)} else {original_deck} end"
 
 
 def queued_cards_counts(queued_cards: Any) -> Optional[QueueCounts]:
@@ -118,19 +151,13 @@ def completed_counts_by_deck(
     db: Any, cutoff: int, end: Optional[int] = None,
     *, current_deck: Optional[int] = None,
     current_deck_ids: Optional[List[int]] = None,
+    filtered_answers: Optional[FilteredAnswers] = None,
 ) -> Dict[int, Tuple[int, int, int]]:
     range_sql = "r.id >= ?" if end is None else "r.id >= ? and r.id < ?"
     params = [cutoff] if end is None else [cutoff, end]
-    deck_expression = "coalesce(nullif(c.odid, 0), c.did)"
     if current_deck_ids is None and current_deck is not None:
         current_deck_ids = [current_deck]
-    if current_deck_ids:
-        # Include cards currently in a selected filtered deck or one of its
-        # subdecks, matching revlog_stats while attributing each answer once.
-        deck_expression = (
-            f"case when c.did in ({_deck_ids_sql(current_deck_ids)}) then c.did "
-            f"else {deck_expression} end"
-        )
+    deck_expression = _answer_deck_sql(current_deck_ids or [], cutoff, end, filtered_answers)
     rows = db.all(
         f"""
         select {deck_expression} as deck_id,
@@ -199,6 +226,7 @@ def queue_counts_for_node(
 
 def revlog_stats(
     db: Any, start: int, end: int | None, deck_ids: List[int], *, existing_cards_only: bool = False,
+    filtered_answers: Optional[FilteredAnswers] = None,
 ):
     """Aggregate actual answers in ``[start, end)`` with fractional seconds."""
 
@@ -219,6 +247,6 @@ def revlog_stats(
     if not deck_ids:
         return db.first(base + " where " + range_sql, *params)
     selected = _deck_ids_sql(deck_ids)
-    query = base + f""" where {range_sql}
-        and (c.did in ({selected}) or (c.odid != 0 and c.odid in ({selected})))"""
+    deck_expression = _answer_deck_sql(deck_ids, start, end, filtered_answers)
+    query = base + f" where {range_sql} and {deck_expression} in ({selected})"
     return db.first(query, *params)

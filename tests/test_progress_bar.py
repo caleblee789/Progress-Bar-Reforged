@@ -341,16 +341,20 @@ def test_display_location_validation_defaults_to_review(mw):
     assert "display_location 'home' invalid; using review." in addon_config.validation_errors
 
 
-def test_config_persistence_uses_packaged_addon_id(mw):
+@pytest.mark.parametrize("package_id", ["1511983907", "addon"])
+def test_config_persistence_uses_installed_addon_id(mw, monkeypatch, package_id):
     from addon import config as addon_config
 
-    addon_config.apply_config(mw, {"mode": "simple"})
+    monkeypatch.setattr(addon_config, "__package__", package_id)
+    settings = {"mode": "simple"}
+    addon_config.write_config(mw, settings)
 
-    assert mw.addonManager.get_calls[-1] == "1511983907"
-    assert [name for name, _ in mw.addonManager.write_calls] == ["1511983907", "1511983907"]
+    assert addon_config.read_config(mw) == settings
+    assert mw.addonManager.get_calls == [package_id]
+    assert mw.addonManager.write_calls == [(package_id, settings)]
 
 
-def test_settings_dialog_save_uses_packaged_addon_id(addon_module):
+def test_settings_dialog_save_uses_installed_addon_id(addon_module):
     mod = addon_module
 
     dialog = mod.ProgressBarConfigDialog(mod.mw)
@@ -367,18 +371,7 @@ def test_settings_dialog_save_uses_packaged_addon_id(addon_module):
 
     assert dialog._accepted is True
     assert mod.mw.addonManager.write_calls
-    assert all(name == "1511983907" for name, _ in mod.mw.addonManager.write_calls)
-
-
-def test_settings_dialog_save_avoids_obsolete_addon_id(addon_module):
-    mod = addon_module
-
-    dialog = mod.ProgressBarConfigDialog(mod.mw)
-    dialog.progress_bar_enabled_cb.setChecked(False)
-    dialog._save_and_close()
-
-    assert dialog._accepted is True
-    assert "1097423555" not in [name for name, _ in mod.mw.addonManager.write_calls]
+    assert {name for name, _ in mod.mw.addonManager.write_calls} == {"addon"}
 
 
 def test_smtr_is_hidden_by_default_and_can_be_enabled(addon_module):
@@ -741,15 +734,23 @@ def test_progress_bar_default_segments_match_semantic_palette(addon_module):
         assert mod.settings.raw_config == config
 
 
-def test_builtin_palette_migration_preserves_custom_sets_and_geometry(addon_module):
+@pytest.mark.parametrize(
+    ("day_colors", "night_colors"),
+    [
+        (("#111827", "#e7edf3", "#0e7490"), ("aliceblue", "rgba(39, 40, 40, 1)", "#3399cc")),
+        (("#111827", "#e7edf3", "#6389b3"), ("#f1f5f9", "#111827", "#396fa8")),
+    ],
+)
+def test_builtin_palette_migration_preserves_custom_sets_and_geometry(addon_module, day_colors, night_colors):
     mod = addon_module
+    keys = ("text", "background", "foreground")
     old = {
-        "day": {"text": "#111827", "background": "#e7edf3", "foreground": "#0e7490", "opacity": 73, "border_radius": 4},
-        "night": {"text": "aliceblue", "background": "rgba(39, 40, 40, 1)", "foreground": "#3399cc", "opacity": 82, "border_radius": 7},
+        "day": {**dict(zip(keys, day_colors)), "opacity": 73, "border_radius": 4},
+        "night": {**dict(zip(keys, night_colors)), "opacity": 82, "border_radius": 7},
     }
     packaged = json.loads((Path(__file__).parents[1] / "addon" / "config.json").read_text())
     for customized in (None, "day", "night"):
-        for color in ("text", "background", "foreground"):
+        for color in keys:
             saved = deepcopy(old)
             if customized:
                 saved[customized][color] = "#123456"
@@ -759,7 +760,7 @@ def test_builtin_palette_migration_preserves_custom_sets_and_geometry(addon_modu
                 if mode == customized:
                     assert actual == saved[mode]
                 else:
-                    for key in ("text", "background", "foreground"):
+                    for key in keys:
                         assert actual[key] == mod._ui_palette(theme)[f"bar_{key}"] == packaged["appearance"][mode][key]
                     assert actual["opacity"] == saved[mode]["opacity"]
                     assert actual["border_radius"] == saved[mode]["border_radius"]
@@ -920,8 +921,53 @@ def test_completed_counts_use_historical_answer_state_and_original_deck(addon_mo
 
     assert mod._done_counts_by_deck_since(1000) == {10: (1, 2, 1)}
     mod.currDID = 99
+    assert mod._done_counts_by_deck_since(1000) == {10: (1, 2, 1)}
+    mod.mw.pm.profile[mod.FILTERED_ANSWERS_KEY] = {2004: (4, 99)}
     assert mod._done_counts_by_deck_since(1000) == {10: (0, 2, 1), 99: (1, 0, 0)}
     assert mod._revlog_stats_since(1000, [99])[0] == 1
+
+
+def test_filtered_progress_keeps_answers_after_cards_return_home(addon_module):
+    mod = addon_module
+    db = mod.mw.col.db = SQLiteDB()
+    db.execute("create table cards (id integer primary key, did integer, odid integer, "
+               "type integer, queue integer, due integer)")
+    db.execute("create table revlog (id integer primary key, cid integer, type integer, "
+               "lastIvl integer, ease integer, time integer)")
+    mod.mw.col.sched.day_cutoff = 86400
+    mod.mw.col.sched._deck_tree = DeckNode(0, [DeckNode(10), DeckNode(99)])
+    mod.currDID = 99
+
+    # Studied at home before being pulled into the filter.
+    db.execute("insert into revlog values (1000, 3, 0, 0, 4, 5000)")
+
+    for ease in (1, 2, 3, 4):
+        card = SimpleNamespace(id=ease, did=99, odid=10)
+        db.execute("insert into cards values (?, 99, 10, 2, 2, 0)", (card.id,))
+        if ease == 3:
+            mod.updateCountsForAllDecks(True)
+            assert mod.rawDoneCount[99] == 2
+            assert mod._revlog_stats_since(0, [99])[-1] == 2
+        assert mod._on_reviewer_will_answer_card((True, ease), None, card) == (True, ease)
+        if ease != 1:
+            card.did, card.odid = 10, 0
+            db.execute("update cards set did = 10, odid = 0 where id = ?", (card.id,))
+        db.execute("insert into revlog values (?, ?, 1, 10, ?, 1000)", (1000 + ease, card.id, ease))
+        mod._on_reviewer_did_answer_card(None, card, ease)
+
+        mod.updateCountsForAllDecks(True)
+        assert mod.rawDoneCount[99] == ease
+        assert mod._revlog_stats_since(0, [99])[0] == ease
+        assert mod._revlog_stats_since(0, [99])[-1] == ease
+
+    db.execute("delete from revlog where id = 1004")  # Undo the last answer.
+    mod.updateCountsForAllDecks(True)
+    assert mod.rawDoneCount[99] == mod._revlog_stats_since(0, [99])[0] == 3
+
+    mod.currDID = None
+    mod.updateCountsForAllDecks(True)
+    assert mod.rawDoneCount[10] == 4
+    assert mod.rawDoneCount[99] == 0
 
 
 def test_queue_counts_respect_limits_and_exclude_suspended_and_buried(addon_module):
@@ -1380,6 +1426,7 @@ def test_history_export_writes_expected_rows(tmp_path: Path, addon_module):
         mod.HISTORY_PROGRESS_KEY: [
             {
                 "day": 1,
+                "study_date": "1970-01-01",
                 "cards": 5,
                 "avg_seconds": 1.234,
                 "again": 10.5,
@@ -1405,7 +1452,7 @@ def test_history_export_writes_expected_rows(tmp_path: Path, addon_module):
         "retention_percent",
         "super_mature_retention",
     ]
-    assert rows[1] == [mod.history.format_history_day(1), "5", "1.23", "10.50", "80.00", "50.00"]
+    assert rows[1] == ["1970-01-01", "5", "1.23", "10.50", "80.00", "50.00"]
 
 
 def test_malformed_history_is_safely_normalized(addon_module):
@@ -1780,7 +1827,8 @@ def test_package_builder_manifest_uses_canonical_addon_id(tmp_path):
     assert manifest["package"] == "1511983907"
     assert manifest["min_point_version"] == 49
     assert manifest["max_point_version"] == 260500
-    assert manifest["human_version"] == "1.1.8"
+    source_meta = json.loads((package_addon.ADDON_DIR / "meta.json").read_text())
+    assert manifest["human_version"] == source_meta["human_version"]
 
 
 def test_package_builder_is_reproducible_across_checkout_timestamps(tmp_path, monkeypatch):

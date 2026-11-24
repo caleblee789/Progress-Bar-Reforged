@@ -302,16 +302,14 @@ def _apply_config(new_config: Dict[str, Any]) -> None:
 _reload_settings(show_messages=True)
 
 PERSISTED_PROGRESS_KEY = "progress_bar_persistent_counts"
+FILTERED_ANSWERS_KEY = "progress_bar_filtered_answers"
 _PERSIST_INTERVAL_SECONDS = 15.0
 
 
-def _current_day_stamp() -> int:
-    if mw.col is None:
-        return 0
-    cutoff = getattr(mw.col.sched, "day_cutoff", None)
-    if cutoff is None:
-        return 0
-    return cutoff // 86400
+def _filtered_answers() -> progress_scheduler.FilteredAnswers:
+    profile = getattr(mw.pm, "profile", None)
+    answers = profile.get(FILTERED_ANSWERS_KEY) if isinstance(profile, dict) else None
+    return answers if isinstance(answers, dict) else {}
 
 
 def _prepare_counts_for_new_profile() -> None:
@@ -325,8 +323,7 @@ def _ensure_persisted_progress_loaded(day_cutoff: Optional[int] = None) -> None:
         return
     if day_cutoff is None:
         day_cutoff = mw.col.sched.day_cutoff
-    today = day_cutoff // 86400
-    if _progress_state.progress_restored and _progress_state.restored_day_stamp == today:
+    if _progress_state.progress_restored and _progress_state.restored_day_cutoff == day_cutoff:
         return
 
     profile = getattr(mw.pm, "profile", None)
@@ -352,25 +349,33 @@ def _ensure_persisted_progress_loaded(day_cutoff: Optional[int] = None) -> None:
         _progress_state.current_deck_id = deck_id
 
     if isinstance(profile, dict):
-        snapshot_removed = _restore_snapshot_counts(profile, today)
-        if snapshot_removed or history_changed:
+        snapshot_removed = _restore_snapshot_counts(profile, day_cutoff)
+        filtered_answers = _filtered_answers()
+        yesterday_start = progress_scheduler.day_boundary_ms(day_cutoff, 2)
+        expired = [log_id for log_id in filtered_answers if log_id < yesterday_start]
+        for log_id in expired:
+            del filtered_answers[log_id]
+        if snapshot_removed or history_changed or expired:
             mw.pm.save()
     _progress_state.progress_restored = True
-    _progress_state.restored_day_stamp = today
+    _progress_state.restored_day_cutoff = day_cutoff
 
 
-def _restore_snapshot_counts(profile: Dict[str, Any], today: int) -> bool:
+def _restore_snapshot_counts(profile: Dict[str, Any], day_cutoff: int) -> bool:
     """Restore usable counts and report whether a stale snapshot was removed."""
     stored = profile.get(PERSISTED_PROGRESS_KEY)
     if not isinstance(stored, dict):
         return False
 
+    # Older snapshots have only a UTC day number. New snapshots identify the
+    # exact window, so two cutoffs on the same UTC date never share progress.
+    key, expected = ("cutoff", day_cutoff) if "cutoff" in stored else ("day", day_cutoff // 86400)
     try:
-        stored_day = int(stored.get("day"))
+        stored_day = int(stored.get(key))
     except (TypeError, ValueError, OverflowError):
         stored_day = None
     data = stored.get("data")
-    if stored_day != today or not isinstance(data, dict):
+    if stored_day != expected or not isinstance(data, dict):
         profile.pop(PERSISTED_PROGRESS_KEY, None)
         return True
 
@@ -453,7 +458,7 @@ def _persist_progress_snapshot(*, force: bool = False, day_cutoff: Optional[int]
         return
 
     if snapshot:
-        profile[PERSISTED_PROGRESS_KEY] = {"day": today, "data": snapshot}
+        profile[PERSISTED_PROGRESS_KEY] = {"day": today, "cutoff": day_cutoff, "data": snapshot}
     else:
         profile.pop(PERSISTED_PROGRESS_KEY, None)
 
@@ -507,8 +512,14 @@ def initPB() -> None:
 
 
 def _remove_progress_bar() -> None:
-    """Tear down any existing progress bar dock."""
+    """Tear down the bar and close its companion dialog."""
+    global _deck_breakdown_dialog
     progress_ui.remove_progress_bar()
+    if _deck_breakdown_dialog is not None:
+        try:
+            _deck_breakdown_dialog.close()
+        except RuntimeError:
+            _deck_breakdown_dialog = None
 
 
 def _reinitialize_progress_bar() -> None:
@@ -563,6 +574,7 @@ def _done_counts_by_deck_since(
     return progress_scheduler.completed_counts_by_deck(
         mw.col.db, cutoff, progress_scheduler.day_boundary_ms(day_cutoff),
         current_deck=currDID, current_deck_ids=selected_decks,
+        filtered_answers=_filtered_answers(),
     )
 
 
@@ -597,7 +609,9 @@ def _revlog_stats_since(cutoff: int, deck_ids: Optional[List[int]]):
 def _revlog_stats_between(start: int, end: int, deck_ids: Optional[List[int]]):
     if deck_ids is None:
         return progress_scheduler.revlog_stats(mw.col.db, start, end, [], existing_cards_only=True)
-    return progress_scheduler.revlog_stats(mw.col.db, start, end, deck_ids)
+    return progress_scheduler.revlog_stats(
+        mw.col.db, start, end, deck_ids, filtered_answers=_filtered_answers(),
+    )
 
 
 def _current_tzinfo():
@@ -609,20 +623,20 @@ def _current_tzinfo():
     return tzinfo or timezone.utc
 
 
-def _historical_seconds_per_card(today: int) -> Optional[float]:
+def _historical_seconds_per_card(today: int, *, day_cutoff: Optional[int] = None) -> Optional[float]:
     profile = getattr(getattr(mw, "pm", None), "profile", None)
     if not isinstance(profile, dict):
         return None
-    return history.historical_seconds_per_card(profile, today)
+    return history.historical_seconds_per_card(profile, today, day_cutoff=day_cutoff)
 
 
 def _pace_estimate_for_today(
-    cards_today: int, seconds_today: float, *, today: Optional[int] = None,
+    cards_today: int, seconds_today: float, *, day_cutoff: int,
 ) -> Optional[Tuple[float, str]]:
     if cards_today >= _TODAY_PACE_MIN_CARDS and seconds_today > 0:
         return (float(seconds_today) / cards_today, "today")
 
-    historical_seconds = _historical_seconds_per_card(_current_day_stamp() if today is None else today)
+    historical_seconds = _historical_seconds_per_card(day_cutoff // 86400, day_cutoff=day_cutoff)
     if historical_seconds and historical_seconds > 0:
         return (historical_seconds, "history")
 
@@ -956,7 +970,7 @@ def updatePB(deck_tree=None, *, day_cutoff: Optional[int] = None):
         ysecspeed_value = 0
         ysecspeed_display = "N/A"
 
-    pace_estimate = _pace_estimate_for_today(int(cards), float(thetime), today=day_cutoff // 86400)
+    pace_estimate = _pace_estimate_for_today(int(cards), float(thetime), day_cutoff=day_cutoff)
     if pace_estimate is not None:
         pace_seconds_per_card, _ = pace_estimate
         speed = 60.0 / pace_seconds_per_card
@@ -1373,6 +1387,29 @@ def _on_reviewer_did_show_question(*_args: Any) -> None:
     showQuestionCallBack()
 
 
+def _on_reviewer_will_answer_card(ease_tuple, _reviewer, card):
+    _progress_state.pending_filtered_answer = None
+    if ease_tuple[0] and card.odid and mw.col is not None:
+        _progress_state.pending_filtered_answer = (
+            card.id, card.did, progress_scheduler.latest_answer_id(mw.col.db, card.id),
+        )
+    return ease_tuple
+
+
+def _on_reviewer_did_answer_card(_reviewer, card, _ease) -> None:
+    pending = _progress_state.pending_filtered_answer
+    _progress_state.pending_filtered_answer = None
+    profile = getattr(mw.pm, "profile", None)
+    if pending is None or pending[0] != card.id or mw.col is None or not isinstance(profile, dict):
+        return
+    card_id, filtered_deck_id, previous_log_id = pending
+    log_id = progress_scheduler.latest_answer_id(mw.col.db, card_id)
+    if log_id is not None and (previous_log_id is None or log_id > previous_log_id):
+        answers = _filtered_answers()
+        answers[log_id] = (card_id, filtered_deck_id)
+        profile[FILTERED_ANSWERS_KEY] = answers
+
+
 def _on_operation_did_execute(changes: Any, _handler: Any) -> None:
     """Refresh Home/Overview after edits that do not change Anki's screen."""
     if (
@@ -1402,6 +1439,9 @@ register_once(
     _on_reviewer_did_show_question,
     "reviewer_did_show_question",
 )
+if hasattr(gui_hooks, "reviewer_will_answer_card") and hasattr(gui_hooks, "reviewer_did_answer_card"):
+    register_once(gui_hooks.reviewer_will_answer_card, _on_reviewer_will_answer_card, "reviewer_will_answer_card")
+    register_once(gui_hooks.reviewer_did_answer_card, _on_reviewer_did_answer_card, "reviewer_did_answer_card")
 if hasattr(gui_hooks, "operation_did_execute"):
     register_once(gui_hooks.operation_did_execute, _on_operation_did_execute, "operation_did_execute")
 if hasattr(gui_hooks, "day_did_change"):
@@ -1777,7 +1817,8 @@ class ShortcutField(QWidget):
 
         self._editor = QKeySequenceEdit()
         self._editor.setObjectName("shortcutRecorder")
-        self._editor.setClearButtonEnabled(True)
+        if hasattr(self._editor, "setClearButtonEnabled"):
+            self._editor.setClearButtonEnabled(True)
         if hasattr(self._editor, "setMaximumSequenceLength"):
             try:
                 self._editor.setMaximumSequenceLength(1)
@@ -2645,6 +2686,7 @@ class DeckBreakdownDialog(QDialog):
         self._hide_empty_cb = None
         self._sort_combo = None
         self._raw_rows: List[Dict[str, Any]] = []
+        self._visible_deck_items: Dict[int, QTreeWidgetItem] = {}
         self._summary: Dict[str, Any] = _build_breakdown_summary([])
         self._hide_empty = True
         self._sort_mode = "deck"
@@ -2947,6 +2989,9 @@ class DeckBreakdownDialog(QDialog):
         item.setData(column, _BREAKDOWN_COUNTS_ROLE, counts)
         item.setData(column, _BREAKDOWN_MUTED_ROLE, muted)
         item.setData(column, _BREAKDOWN_TOTAL_ROLE, _count_total(counts))
+        accessible_text = _format_counts_accessible("Due today" if column == 1 else "Buried", counts)
+        item.setData(column, Qt.ItemDataRole.AccessibleTextRole, accessible_text)
+        item.setToolTip(column, accessible_text)
 
     def _apply_row_style(self, item: QTreeWidgetItem, muted: bool, eta_muted: bool, is_child: bool) -> None:
         palette = self._palette
@@ -2979,6 +3024,9 @@ class DeckBreakdownDialog(QDialog):
         name = str(row.get("name", ""))
 
         item = QTreeWidgetItem(parent_item or self._tree)
+        deck_id = row.get("deck_id")
+        if deck_id is not None:
+            self._visible_deck_items[deck_id] = item
         item.setText(0, name)
         self._set_count_data(item, 1, actionable, muted)
         self._set_count_data(item, 2, buried, muted and _count_total(buried) == 0)
@@ -2997,8 +3045,6 @@ class DeckBreakdownDialog(QDialog):
                 _report_ui_failure("style parent deck row", exc)
         if hasattr(item, "setToolTip"):
             item.setToolTip(0, name)
-            item.setToolTip(1, _format_counts_accessible("Due today", actionable))
-            item.setToolTip(2, _format_counts_accessible("Buried", buried))
             item.setToolTip(3, "No ETA yet" if eta_muted else f"Finish estimate: {eta_text}")
         item.setTextAlignment(1, int(Qt.AlignmentFlag.AlignVCenter))
         item.setTextAlignment(2, int(Qt.AlignmentFlag.AlignVCenter))
@@ -3014,14 +3060,33 @@ class DeckBreakdownDialog(QDialog):
         return _sort_breakdown_rows(rows, self._sort_mode)
 
     def _rebuild_tree(self) -> None:
-        if self._tree is None:
+        tree = self._tree
+        if tree is None:
             return
-        self._tree.clear()
+
+        current = tree.currentItem()
+        current_deck = next((deck_id for deck_id, item in self._visible_deck_items.items() if item is current), None)
+        current_column = tree.currentColumn()
+        expanded = {deck_id: item.isExpanded() for deck_id, item in self._visible_deck_items.items()}
+        scrollbars = (tree.horizontalScrollBar(), tree.verticalScrollBar())
+        scroll_positions = [bar.value() for bar in scrollbars]
+
+        tree.clear()
+        self._visible_deck_items.clear()
         visible_rows = self._visible_rows()
         for row in visible_rows:
             self._add_row(row)
-        self._tree.expandToDepth(1)
-        self._resize_columns_to_content(visible_rows)
+        tree.expandToDepth(1)
+        for deck_id, item in self._visible_deck_items.items():
+            if deck_id in expanded:
+                item.setExpanded(expanded[deck_id])
+        if current_deck in self._visible_deck_items:
+            tree.setCurrentItem(self._visible_deck_items[current_deck], current_column)
+        if self._auto_fit_pending:
+            self._resize_columns_to_content(visible_rows)
+        tree.doItemsLayout()
+        for bar, position in zip(scrollbars, scroll_positions):
+            bar.setValue(position)
 
     def _on_hide_empty_changed(self, checked: bool) -> None:
         self._hide_empty = bool(checked)
@@ -3265,7 +3330,9 @@ class ProgressBarConfigDialog(QDialog):
         self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(mode)))
 
         dock = str(cfg.get("dock_area", "top")).lower()
-        if dock not in {"top", "bottom"}:
+        if dock in {"left", "right"}:
+            self.dock_area_combo.addItem(f"{dock.title()} (legacy)", dock)
+        elif dock not in {"top", "bottom"}:
             dock = "top"
         self.dock_area_combo.setCurrentIndex(max(0, self.dock_area_combo.findData(dock)))
 
@@ -3287,8 +3354,10 @@ class ProgressBarConfigDialog(QDialog):
         updated_config["display_location"] = self.display_location_combo.currentData() or "review"
         updated_config["show_super_mature_retention"] = self.show_smtr_cb.isChecked()
         updated_config["mode"] = self.mode_combo.currentData() or "stats"
-        updated_config["dock_area"] = self.dock_area_combo.currentData() or "top"
-        updated_config["orientation"] = "horizontal"
+        dock = self.dock_area_combo.currentData() or "top"
+        if dock != updated_config.get("dock_area"):
+            updated_config["orientation"] = "vertical" if dock in {"left", "right"} else "horizontal"
+        updated_config["dock_area"] = dock
         updated_config["theme"] = self.theme_combo.currentData() or "auto"
         updated_config["toggle_shortcut"] = self.shortcut_field.value().strip() or self.shortcut_field._default
         return updated_config
@@ -3334,7 +3403,7 @@ class ProgressBarConfigDialog(QDialog):
 def _open_config_dialog() -> None:
     dialog = ProgressBarConfigDialog(mw)
     try:
-        dialog.exec()
+        (getattr(dialog, "exec", None) or dialog.exec_)()
     finally:
         dialog.deleteLater()
 
@@ -3344,7 +3413,7 @@ def _open_session_history_dialog() -> None:
     dialog = SessionHistoryDialog(mw)
     _session_history_dialog = dialog
     try:
-        dialog.exec()
+        (getattr(dialog, "exec", None) or dialog.exec_)()
     finally:
         _session_history_dialog = None
         dialog.deleteLater()

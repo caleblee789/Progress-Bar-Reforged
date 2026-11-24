@@ -190,6 +190,7 @@ class Qt:
         Key_Space = 32
 
     class ItemDataRole:
+        AccessibleTextRole = 11
         UserRole = 32
 
     class AlignmentFlag:
@@ -919,8 +920,11 @@ class QTreeWidget(QWidget):
         self._header = QHeaderView()
         self._items: List["QTreeWidgetItem"] = []
         self._current_item: Optional["QTreeWidgetItem"] = None
+        self._current_column = -1
         self._headers: List[str] = []
         self._column_widths: Dict[int, int] = {}
+        self._horizontal_scrollbar = QSpinBox()
+        self._vertical_scrollbar = QSpinBox()
 
     def setRootIsDecorated(self, value: bool) -> None:
         self._root_decorated = value
@@ -955,15 +959,37 @@ class QTreeWidget(QWidget):
     def clear(self) -> None:
         self._items.clear()
         self._current_item = None
+        self._current_column = -1
 
     def currentItem(self) -> Optional["QTreeWidgetItem"]:
         return self._current_item
 
-    def setCurrentItem(self, item: "QTreeWidgetItem") -> None:
+    def setCurrentItem(self, item: "QTreeWidgetItem", column: int = 0) -> None:
         self._current_item = item
+        self._current_column = column
+
+    def currentColumn(self) -> int:
+        return self._current_column
 
     def expandToDepth(self, depth: int) -> None:
         self._expanded_to = depth
+
+        def expand(item: "QTreeWidgetItem", level: int) -> None:
+            item.setExpanded(level <= depth)
+            for child in item.children:
+                expand(child, level + 1)
+
+        for item in self._items:
+            expand(item, 0)
+
+    def horizontalScrollBar(self) -> "QSpinBox":
+        return self._horizontal_scrollbar
+
+    def verticalScrollBar(self) -> "QSpinBox":
+        return self._vertical_scrollbar
+
+    def doItemsLayout(self) -> None:
+        pass
 
     def resizeColumnToContents(self, column: int) -> None:
         self._resized_columns = getattr(self, "_resized_columns", [])
@@ -1000,6 +1026,7 @@ class QTreeWidgetItem:
         self._alignments: Dict[int, Any] = {}
         self._fonts: Dict[int, QFont] = {}
         self.children: List["QTreeWidgetItem"] = []
+        self._expanded = False
         if isinstance(parent, QTreeWidget):
             parent._items.append(self)
         elif isinstance(parent, QTreeWidgetItem):
@@ -1016,6 +1043,12 @@ class QTreeWidgetItem:
 
     def data(self, column: int, role: int) -> Any:
         return self._data.get((column, role))
+
+    def isExpanded(self) -> bool:
+        return self._expanded
+
+    def setExpanded(self, expanded: bool) -> None:
+        self._expanded = expanded
 
     def setTextAlignment(self, column: int, alignment: Any) -> None:
         self._alignments[column] = alignment
@@ -1348,8 +1381,8 @@ class AddonManagerStub:
         return dict(self.config)
 
     def writeConfig(self, name: str, config: Dict[str, Any]) -> None:
-        if name in self.missing_package_ids or name.split(".", 1)[0] == "addon":
-            raise FileNotFoundError("[Errno 2] No such file or directory: 'addons21/addon/meta.json'")
+        if name in self.missing_package_ids:
+            raise FileNotFoundError(f"addons21/{name}/meta.json")
         self.write_calls.append((name, dict(config)))
         self.config = dict(config)
 

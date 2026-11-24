@@ -14,6 +14,23 @@ def test_switching_modes_keeps_advanced_retention_preference(addon_module):
         assert mod.settings.show_super_mature_retention is (mode == "stats")
 
 
+def test_settings_preserve_legacy_dock_until_position_changes(addon_module):
+    mod = addon_module
+    mod._apply_config({"dock_area": "left", "orientation": "vertical"})
+    dialog = mod.ProgressBarConfigDialog(mod.mw)
+    assert dialog.dock_area_combo.currentData() == "left"
+
+    dialog.theme_combo.setCurrentIndex(dialog.theme_combo.findData("dark"))
+    dialog._apply_without_closing()
+    saved = mod.mw.addonManager.config
+    assert (saved["dock_area"], saved["orientation"]) == ("left", "vertical")
+
+    dialog.dock_area_combo.setCurrentIndex(dialog.dock_area_combo.findData("bottom"))
+    dialog._save_and_close()
+    saved = mod.mw.addonManager.config
+    assert (saved["dock_area"], saved["orientation"]) == ("bottom", "horizontal")
+
+
 @pytest.mark.parametrize("orientation, prop", [("horizontal", "min-height"), ("vertical", "min-width")])
 def test_configured_minimum_thickness_survives_stylesheet_generation(mw, orientation, prop):
     from addon.config import apply_config

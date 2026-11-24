@@ -23,8 +23,9 @@ class ProgressState:
     buried_learning: Dict[int, int] = field(default_factory=dict)
     buried_new: Dict[int, int] = field(default_factory=dict)
     current_deck_id: Optional[int] = None
+    pending_filtered_answer: Optional[tuple[int, int, Optional[int]]] = None
     main_window_state: Optional[str] = "deckBrowser"
-    restored_day_stamp: Optional[int] = None
+    restored_day_cutoff: Optional[int] = None
     progress_restored: bool = False
     last_snapshot: Optional[Dict[str, Any]] = None
     last_persisted_ts: float = 0.0
@@ -45,9 +46,10 @@ class ProgressState:
         ):
             counts.clear()
         self.current_deck_id = None
+        self.pending_filtered_answer = None
         self.main_window_state = "profileManager"
         self.progress_restored = False
-        self.restored_day_stamp = None
+        self.restored_day_cutoff = None
         self.last_snapshot = None
         self.last_persisted_ts = 0.0
         self.last_history_cutoff = None

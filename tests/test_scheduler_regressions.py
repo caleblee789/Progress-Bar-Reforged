@@ -40,6 +40,7 @@ def test_large_deck_tree_batches_burials_and_matches_filtered_subdeck_stats(addo
     mod.mw.col.sched._deck_tree = DeckNode(0, [parent, DeckNode(9000)])
     mod.mw.col.sched.day_cutoff = 86400
     mod.mw.col.sched.today = 0
+    mod.mw.pm.profile[mod.FILTERED_ANSWERS_KEY] = {1001: (1, 1001)}
     statements = []
     db.connection.set_trace_callback(statements.append)
     mod.currDID = 1
@@ -92,9 +93,9 @@ def test_question_uses_a_single_cutoff_for_counts_stats_and_history(addon_module
     mod.showQuestionCallBack()
     assert (sched.cutoff_reads, sched.today_reads) == (1, 1)
     assert mod._progress_state.last_history_cutoff == cutoff
-    assert mod._progress_state.restored_day_stamp == cutoff // 86400
+    assert mod._progress_state.restored_day_cutoff == cutoff
     assert mod._progress_state.weight_history_key[1] == cutoff
-    assert mod.mw.pm.profile[mod.PERSISTED_PROGRESS_KEY]["day"] == cutoff // 86400
+    assert mod.mw.pm.profile[mod.PERSISTED_PROGRESS_KEY]["cutoff"] == cutoff
     assert any(params == (3, 3, cutoff) for _, params in db.all_calls)
 
     # Repeated questions also share the cutoff during throttled profile saves.

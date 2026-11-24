@@ -164,7 +164,7 @@ DARK = ThemeTokens(
     chart_cards="#60a5fa",
     chart_again="#f87171",
     chart_retention="#4ade80",
-    bar_text="#f1f5f9",
+    bar_text="#ffffff",
     bar_background="#111827",
     bar_foreground="#396fa8",
 )
@@ -243,7 +243,7 @@ LIGHT = ThemeTokens(
     chart_cards="#2563eb",
     chart_again="#dc2626",
     chart_retention="#15803d",
-    bar_text="#111827",
+    bar_text="#0b1220",
     bar_background="#e7edf3",
     bar_foreground="#6389b3",
 )

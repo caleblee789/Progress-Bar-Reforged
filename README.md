@@ -3,7 +3,14 @@ Progress Bar Reforged for Anki
 
 Progress Bar Reforged adds a progress bar to Anki's reviewer. It shows how much of today's review work is done, how much is left, how fast you are moving, and when you are likely to finish.
 
-**v1.1.8** is available as an [installable package](dist/progress_bar_time_left.ankiaddon). Published releases are also available on [AnkiWeb](https://ankiweb.net/shared/info/1511983907) (code `1511983907`) and [GitHub](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+**v1.1.9** is available as an [installable package](dist/progress_bar_time_left.ankiaddon). Published releases are also available on [AnkiWeb](https://ankiweb.net/shared/info/1511983907) (code `1511983907`) and [GitHub](https://github.com/caleblee789/Progress-Bar-Reforged/releases/latest).
+
+What's new in v1.1.9
+--------------------
+
+* **Accurate filtered-deck progress.** All four ratings count toward Done, even when Anki sends a card back to its original deck. Building a filter no longer adds answers from the original deck to its progress.
+* **More readable progress.** Higher contrast for the progress bar text in Light and Dark themes. Deck Breakdown keeps your selection and collapsed rows as counts update and exposes Due and Buried counts to screen readers.
+* **More reliable settings and history.** Settings preserves saved side docks and handles older Qt versions. History uses the study date across day changes, including daylight saving transitions.
 
 What's new in v1.1.8
 --------------------

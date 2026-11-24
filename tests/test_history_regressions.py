@@ -1,9 +1,13 @@
+import pytest
+
 from tests.test_progress_bar import SequenceDB, SQLiteDB
 
 
-def test_rollover_finishes_last_active_day_after_throttled_save(addon_module, monkeypatch):
+@pytest.mark.parametrize("hours_until_next_cutoff", [23, 72])
+def test_rollover_finishes_last_active_day_after_throttled_save(addon_module, monkeypatch, hours_until_next_cutoff):
     mod = addon_module
-    cutoff = 86400 * 20
+    # A 23-hour local day can leave consecutive cutoffs in the same UTC bucket.
+    cutoff = 86400 * 20 + 1800
     mod.mw.col.sched.day_cutoff = cutoff
     db = mod.mw.col.db = SQLiteDB()
     db.execute("create table cards (id integer primary key)")
@@ -34,13 +38,10 @@ def test_rollover_finishes_last_active_day_after_throttled_save(addon_module, mo
         mod._persist_progress_snapshot()
     assert records[0]["cards"] == 1
 
-    # The machine can sleep past more than one rollover.
-    mod.mw.col.sched.day_cutoff += 3 * 86400
+    mod.mw.col.sched.day_cutoff += hours_until_next_cutoff * 3600
     mod._ensure_persisted_progress_loaded()
-    assert mod.mw.pm.profile[mod.HISTORY_PROGRESS_KEY] == [
-        {"day": 20, "cards": 2, "avg_seconds": 2, "again": 0,
-         "retention": 100, "super_mature_retention": 0}
-    ]
+    record, = mod.mw.pm.profile[mod.HISTORY_PROGRESS_KEY]
+    assert (record["cutoff"], record["cards"], record["avg_seconds"]) == (cutoff, 2, 2)
     assert mod.PERSISTED_PROGRESS_KEY not in mod.mw.pm.profile
 
 

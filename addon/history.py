@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import math
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from aqt import mw
@@ -117,27 +117,39 @@ def read_history_records(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
             100.0,
             max(0.0, _safe_number(entry.get("super_mature_retention", 0.0))),
         )
-        normalized.append(
-            {
-                "day": day_int,
-                "cards": cards,
-                "avg_seconds": avg_seconds,
-                "again": again,
-                "retention": retention,
-                "super_mature_retention": super_mature_retention,
-            }
-        )
+        record = {
+            "day": day_int,
+            "cards": cards,
+            "avg_seconds": avg_seconds,
+            "again": again,
+            "retention": retention,
+            "super_mature_retention": super_mature_retention,
+        }
+        cutoff = entry.get("cutoff")
+        if isinstance(cutoff, int) and cutoff > 0:
+            record["cutoff"] = cutoff
+        try:
+            record["study_date"] = date.fromisoformat(entry.get("study_date")).isoformat()
+        except (TypeError, ValueError):
+            pass  # Legacy entries keep their original day label.
+        normalized.append(record)
     return normalized
 
 
-def historical_seconds_per_card(profile: Dict[str, Any], today: int) -> Optional[float]:
+def historical_seconds_per_card(
+    profile: Dict[str, Any], today: int, *, day_cutoff: Optional[int] = None,
+) -> Optional[float]:
     total_cards = 0
     total_seconds = 0.0
     # Counts and total recorded milliseconds both come from SQLite integer
     # aggregates. Ignore impossible legacy samples before they reach the ETA.
     max_sql_integer = 2**63 - 1
     for day, entry in _history_rows(profile):
-        if day >= today:
+        cutoff = entry.get("cutoff")
+        if day_cutoff is not None and isinstance(cutoff, int) and cutoff > 0:
+            if cutoff >= day_cutoff:
+                continue
+        elif day >= today:
             continue
         cards = int(_safe_number(entry.get("cards")))
         if not 0 < cards <= max_sql_integer:
@@ -158,6 +170,10 @@ def format_history_day(day_stamp: int) -> str:
         return datetime.fromtimestamp(day_stamp * 86400).strftime("%Y-%m-%d")
     except Exception:
         return str(day_stamp)
+
+
+def _history_date_label(entry: Dict[str, Any]) -> str:
+    return entry.get("study_date") or format_history_day(entry["day"])
 
 
 def calculate_today_history_entry(
@@ -195,6 +211,8 @@ def calculate_today_history_entry(
 
     return {
         "day": day_stamp,
+        "cutoff": day_cutoff,
+        "study_date": datetime.fromtimestamp(day_start / 1000).date().isoformat(),
         "cards": int(cards),
         "avg_seconds": float(avg_seconds),
         "again": float(again_rate),
@@ -226,7 +244,7 @@ def update_daily_history(
         previous_records
         and previous_records is profile.get(HISTORY_PROGRESS_KEY)
         and isinstance(previous_records[0], dict)
-        and previous_records[0].get("day") == day_stamp
+        and previous_records[0].get("cutoff") == day_cutoff
     ):
         # This list was already normalized and sorted by the preceding save.
         previous_records[0] = entry
@@ -235,9 +253,13 @@ def update_daily_history(
         return previous_records
 
     history = read_history_records(profile)
-    history = [item for item in history if item.get("day") != day_stamp]
+    history = [
+        item for item in history
+        if item.get("cutoff") != day_cutoff and item.get("study_date") != entry["study_date"]
+        and ("cutoff" in item or item["day"] != day_stamp)
+    ]
     history.append(entry)
-    history.sort(key=lambda item: item.get("day", 0), reverse=True)
+    history.sort(key=lambda item: item.get("cutoff", item["day"] * 86400), reverse=True)
     if history_days > 0:
         history = history[: history_days]
 
@@ -377,7 +399,7 @@ class SessionHistoryDialog(QDialog):
         filtered = self._filtered_history()
         self.table.setRowCount(len(filtered))
         for row_idx, entry in enumerate(filtered):
-            day_display = format_history_day(int(entry.get("day", 0)))
+            day_display = _history_date_label(entry)
             cards_display = str(int(entry.get("cards", 0)))
             avg_seconds_display = f"{float(entry.get('avg_seconds', 0.0)):.2f}"
             again_display = f"{float(entry.get('again', 0.0)):.2f}"
@@ -400,12 +422,12 @@ class SessionHistoryDialog(QDialog):
 
     def _update_charts(self) -> None:
         filtered = list(reversed(self._filtered_history()))  # oldest to newest for plotting
-        cards_points: List[Tuple[int, float]] = []
-        again_points: List[Tuple[int, float]] = []
-        retention_points: List[Tuple[int, float]] = []
+        cards_points: List[Tuple[str, float]] = []
+        again_points: List[Tuple[str, float]] = []
+        retention_points: List[Tuple[str, float]] = []
 
         for entry in filtered:
-            day = int(entry.get("day", 0))
+            day = _history_date_label(entry)
             cards_points.append((day, float(entry.get("cards", 0))))
             again_points.append((day, float(entry.get("again", 0.0))))
             retention_points.append((day, float(entry.get("retention", 0.0))))
@@ -435,7 +457,7 @@ class SessionHistoryDialog(QDialog):
                 for entry in self._filtered_history():
                     writer.writerow(
                         [
-                            format_history_day(int(entry.get("day", 0))),
+                            _history_date_label(entry),
                             int(entry.get("cards", 0)),
                             f"{float(entry.get('avg_seconds', 0.0)):.2f}",
                             f"{float(entry.get('again', 0.0)):.2f}",
@@ -476,7 +498,7 @@ class TrendChartWidget(QWidget):
         self._title = title
         self._palette = palette
         self._accent = QColor(accent)
-        self._points: List[Tuple[int, float]] = []
+        self._points: List[Tuple[str, float]] = []
 
         if hasattr(self, "setMinimumHeight"):
             self.setMinimumHeight(150)
@@ -490,7 +512,7 @@ class TrendChartWidget(QWidget):
         self._accent = QColor(accent)
         self.update()
 
-    def set_points(self, points: Sequence[Tuple[int, float]]) -> None:
+    def set_points(self, points: Sequence[Tuple[str, float]]) -> None:
         self._points = list(points)
         self.update()
 
@@ -556,8 +578,8 @@ class TrendChartWidget(QWidget):
 
         label_pen = QPen(QColor(self._palette["muted_text"]))
         painter.setPen(label_pen)
-        start_day = format_history_day(int(self._points[0][0]))
-        end_day = format_history_day(int(self._points[-1][0]))
+        start_day = self._points[0][0]
+        end_day = self._points[-1][0]
         painter.drawText(rect.adjusted(margin, 0, -margin, -margin), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom), start_day)
         painter.drawText(rect.adjusted(margin, 0, -margin, -margin), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom), end_day)
 
